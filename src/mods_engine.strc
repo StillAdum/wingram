@@ -1,0 +1,265 @@
+# mods_engine — the Wingram Mods system
+#
+# Mods are plain text .strc files dropped into the mods/ folder next to the
+# executable (or %APPDATA%/Wingram/mods). Format (see MODS.md):
+#
+#     # comments and blank lines allowed
+#     [mod]
+#     id = darker-dark
+#     name = Darker Dark
+#     version = 1.0.0
+#     author = you
+#     description = Deepens the dark theme.
+#
+#     [theme]
+#     accent = 0x7C3AED
+#     bg = 0x000000
+#
+#     [features]
+#     feed_density = compact
+#
+# Sections are optional except [mod] with at least an id. All key=value pairs
+# are stored per section; Wingram reads known theme keys to build the palette
+# and reads feature flags generically, so mods can carry custom keys for
+# their own purposes without breaking the loader.
+
+use io
+use "src/theme.strc"
+
+type Mod:
+    file: str
+    id: str
+    name: str
+    version: str
+    author: str
+    description: str
+    sections: {str: str}     # "section.key" -> value (flattened)
+    enabled: bool = false
+
+    func summary(self) -> str:
+        return "{self.name} v{self.version} by {self.author}"
+
+type ModEngine:
+    mods: [Mod]
+    dir: str = "mods"
+
+    func scan(self):
+        self.mods = []
+        names = read_dir(self.dir)
+        for n in names:
+            if not n.ends(".strc"):
+                continue
+            path = "{self.dir}/{n}"
+            text = ""
+            ok = read_file_if_exists(path, "")
+            if ok != "":
+                m = parse_mod(path, ok)
+                if m.id != "":
+                    push(self.mods, m)
+
+    func get_mod(self, id: str) -> Mod:
+        for m in self.mods:
+            if m.id == id:
+                return m
+        return Mod("", "", "", "", "", "", {}, false)
+
+    func find_index(self, id: str) -> int:
+        for i in range(len(self.mods)):
+            if self.mods[i].id == id:
+                return i
+        return -1
+
+    func set_enabled(self, id: str, on: bool) -> bool:
+        i = self.find_index(id)
+        if i < 0:
+            return false
+        self.mods[i].enabled = on
+        return true
+
+    func toggle(self, id: str) -> bool:
+        i = self.find_index(id)
+        if i < 0:
+            return false
+        self.mods[i].enabled = not self.mods[i].enabled
+        return self.mods[i].enabled
+
+    func enabled_count(self) -> int:
+        n = 0
+        for m in self.mods:
+            if m.enabled:
+                n = n + 1
+        return n
+
+    # merged value lookup: the LAST enabled mod that sets section.key wins
+    func value(self, section: str, key: str, fallback: str = "") -> str:
+        out = fallback
+        for m in self.mods:
+            if not m.enabled:
+                continue
+            k = "{section}.{key}"
+            if k in m.sections:
+                out = m.sections[k]
+        return out
+
+    func has_feature(self, key: str, expected: str) -> bool:
+        return self.value("features", key, "").lower() == expected.lower()
+
+    func apply_theme(self, t: Theme) -> Theme:
+        # theme overrides from enabled mods
+        keys = ["bg", "surface", "surface2", "border", "text", "text_dim", "text_faint",
+            "accent", "accent_soft", "like", "badge", "online", "note_self", "note_other",
+            "sticker_a", "sticker_b"]
+        for k in keys:
+            v = self.value("theme", k, "")
+            if v != "":
+                c = parse_color(v)
+                if k == "bg" and c > 0:
+                    t.bg = c
+                if k == "surface" and c > 0:
+                    t.surface = c
+                if k == "surface2" and c > 0:
+                    t.surface2 = c
+                if k == "border" and c > 0:
+                    t.border = c
+                if k == "text" and c > 0:
+                    t.text = c
+                if k == "text_dim" and c > 0:
+                    t.text_dim = c
+                if k == "text_faint" and c > 0:
+                    t.text_faint = c
+                if k == "accent" and c > 0:
+                    t.accent = c
+                if k == "accent_soft" and c > 0:
+                    t.accent_soft = c
+                if k == "like" and c > 0:
+                    t.like = c
+                if k == "badge" and c > 0:
+                    t.badge = c
+                if k == "online" and c > 0:
+                    t.online = c
+                if k == "note_self" and c > 0:
+                    t.note_self = c
+                if k == "note_other" and c > 0:
+                    t.note_other = c
+                if k == "sticker_a" and c > 0:
+                    t.sticker_a = c
+                if k == "sticker_b" and c > 0:
+                    t.sticker_b = c
+        return t
+
+# Parse one mod file's text into a Mod. Sections accumulate; unknown sections
+# are kept too (accessible via engine.value(section, key)).
+func parse_mod(path: str, text: str) -> Mod:
+    m = Mod(path, "", "(unnamed mod)", "0.0", "unknown", "", {}, false)
+    section = ""
+    lines = text.split("\n")
+    for raw in lines:
+        line = raw.trim()
+        if line == "":
+            continue
+        c0 = line[0]
+        if c0 == "#":
+            continue
+        if c0 == "[" and line.contains("]"):
+            close = find_char(line, "]")
+            if close > 0:
+                section = line[1:close].trim().lower()
+            continue
+        eq = find_char(line, "=")
+        if eq > 0 and section != "":
+            key = line[0:eq].trim().lower()
+            val = line[eq + 1:].trim()
+            if section == "mod":
+                if key == "id":
+                    m.id = val
+                elif key == "name":
+                    m.name = val
+                elif key == "version":
+                    m.version = val
+                elif key == "author":
+                    m.author = val
+                elif key == "description":
+                    m.description = val
+            store_key = "{section}.{key}"
+            m.sections[store_key] = val
+    return m
+
+func find_char(s: str, target: str) -> int:
+    for i in range(len(s)):
+        if s[i] == target:
+            return i
+    return -1
+
+func read_file_if_exists(path: str, fallback: str) -> str:
+    if file_exists(path):
+        return read_file(path)
+    return fallback
+
+# --------------------------------------------------- enabled-state persistence
+# config.ini next to the exe: [mods] enabled = id1,id2,...
+
+func save_config(path: str, engine: ModEngine, settings: {str: str}):
+    lines = []
+    push(lines, "# wingram configuration (auto-written)")
+    push(lines, "")
+    push(lines, "[mods]")
+    ids = ""
+    for m in engine.mods:
+        if m.enabled:
+            if ids != "":
+                ids = ids + ","
+            ids = ids + m.id
+    push(lines, "enabled = {ids}")
+    push(lines, "")
+    push(lines, "[account]")
+    ks = ["backend", "fediverse_instance", "instagram_sessionid", "username"]
+    for k in ks:
+        v = settings.get(k, "")
+        push(lines, "{k} = {v}")
+    push(lines, "")
+    push(lines, "[prefs]")
+    ks2 = ["note_songs_default", "preview_on_pick", "feed_density"]
+    for k in ks2:
+        v = settings.get(k, "")
+        push(lines, "{k} = {v}")
+    write_file(path, "\n".join(lines))
+
+func load_config(path: str) -> {str: str}:
+    out = {}
+    if not file_exists(path):
+        return out
+    text = read_file(path)
+    section = ""
+    lines = text.split("\n")
+    for raw in lines:
+        line = raw.trim()
+        if line == "":
+            continue
+        c0 = line[0]
+        if c0 == "#":
+            continue
+        if c0 == "[" and line.contains("]"):
+            close = find_char(line, "]")
+            if close > 0:
+                section = line[1:close].trim().lower()
+            continue
+        eq = find_char(line, "=")
+        if eq > 0 and section != "":
+            key = line[0:eq].trim().lower()
+            val = line[eq + 1:].trim()
+            out["{section}.{key}"] = val
+    return out
+
+# Apply the persisted enabled-list to an engine. ModEngine is a value, so
+# this takes a copy, flips flags in place and returns it — assign it back:
+#   app.mods = apply_config(app.mods, cfg)
+func apply_config(engine: ModEngine, cfg: {str: str}) -> ModEngine:
+    enabled = cfg.get("mods.enabled", "")
+    if enabled == "":
+        return engine
+    ids = enabled.split(",")
+    for id in ids:
+        t = id.trim()
+        if t != "":
+            engine.set_enabled(t, true)
+    return engine

@@ -1,0 +1,89 @@
+# screen_reels — vertical reels viewer with side actions and song stickers
+
+use gui
+use "src/theme.strc"
+use "src/types.strc": User, Reel
+use "src/songs.strc"
+use "src/ui_kit.strc"
+use "src/app.strc"
+use "src/adapters.strc"
+
+CARD_W = 420
+
+func render(app: App) -> App:
+    win = app.win
+    t = app.theme
+    x0 = 24.0
+    y = 20.0
+    gui.text_bold(win, x0, y, "Reels", t.text, 24)
+    y = y + 46.0
+    # horizontal swipe-ish: scroll wheel moves through reels
+    wheel = gui.wheel_delta(win)
+    idx = app.scroll_of("reels")
+    if wheel != 0:
+        idx = idx + (1 if wheel < 0 else -1)
+    n = len(app.reels)
+    if idx < 0:
+        idx = 0
+    if idx >= n:
+        idx = n - 1
+    app.set_scroll("reels", idx)
+    if n == 0:
+        gui.text(win, x0, y + 30.0, "no reels loaded", t.text_dim, 14)
+        return app
+    r = app.reels[idx]
+    # card
+    cw = float(CARD_W)
+    ch = 520.0
+    cx = x0 + 10.0
+    cy = y
+    pair = gradient_pair(r.photo_arg)
+    gui.fill_round(win, cx, cy, cw, ch, 12.0, pair.0)
+    draw_gradient_rect(win, cx + 8.0, cy + 8.0, cw - 16.0, ch - 16.0, pair.0, pair.1, 20)
+    gui.clip_push(win, cx + 8.0, cy + 8.0, cw - 16.0, ch - 16.0)
+    gui.text_bold(win, cx + 24.0, cy + ch - 120.0, r.user.username, 0xFFFFFF, 20)
+    gui.text(win, cx + 24.0, cy + ch - 92.0, r.caption, lerp_color(0xFFFFFF, pair.0, 0.35), 14)
+    gui.clip_pop(win)
+    # side actions
+    ax = cx + cw + 26.0
+    ay = cy + ch - 220.0
+    # like
+    icon_heart(win, t, ax, ay, 26.0, t.text)
+    gui.text(win, ax + 2.0, ay + 30.0, "{r.likes}", t.text, 12)
+    if click_zone(win, ax - 6.0, ay - 6.0, 38.0, 38.0):
+        app.reels[idx].likes = r.likes + 1
+        app.toast_for("liked", 1.0)
+    # comment
+    icon_comment(win, t, ax, ay + 56.0, 26.0, t.text)
+    gui.text(win, ax + 2.0, ay + 86.0, "{r.comments}", t.text, 12)
+    # share
+    icon_send(win, t, ax, ay + 112.0, 26.0, t.text)
+    gui.text(win, ax + 2.0, ay + 142.0, "{r.shares}", t.text, 12)
+    # song sticker with preview
+    if r.song_id != "":
+        s = app.catalog.find(r.song_id)
+        sy = ay + 178.0
+        gui.fill_round(win, ax - 14.0, sy, 170.0, 36.0, 18.0, lerp_color(s.cover_a, s.cover_b, 0.5))
+        icon_music(win, t, ax - 6.0, sy + 10.0, 16.0, 0xFFFFFF)
+        gui.clip_push(win, ax + 14.0, sy, 120.0, 36.0)
+        gui.text_bold(win, ax + 14.0, sy + 10.0, s.title, 0xFFFFFF, 13)
+        gui.clip_pop(win)
+        if click_zone(win, ax - 14.0, sy, 170.0, 36.0):
+            if app.preview_song == r.song_id and app.preview_playing:
+                stop_preview()
+                app.preview_playing = false
+                app.preview_song = ""
+            else:
+                if play_preview(app.catalog, r.song_id):
+                    app.preview_song = r.song_id
+                    app.preview_playing = true
+                    app.toast_for("playing {s.title}", 2.0)
+                else:
+                    app.toast_for("audio backend unavailable (needs Windows)", 2.5)
+    # prev / next
+    if draw_button(win, t, cx + 10.0, cy + ch + 16.0, 90.0, 36.0, "prev", false) and idx > 0:
+        app.set_scroll("reels", idx - 1)
+    if draw_button(win, t, cx + 110.0, cy + ch + 16.0, 90.0, 36.0, "next", false) and idx < n - 1:
+        app.set_scroll("reels", idx + 1)
+    gui.text(win, cx + 220.0, cy + ch + 26.0, "{idx + 1} / {n}", t.text_dim, 13)
+    return app

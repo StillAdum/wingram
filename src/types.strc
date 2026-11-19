@@ -1,0 +1,163 @@
+# types — Wingram data models shared across screens and adapters
+#
+# All screens read/write these models. Adapters (local demo, fediverse,
+# instagram) fill the same shapes, so the UI never knows where data came from.
+
+type User:
+    id: str
+    username: str
+    full_name: str
+    avatar_kind: str = "initials"   # "initials" or "file"
+    avatar_arg: str = ""            # initials color seed or file path
+    bio: str = ""
+    followers: int = 0
+    following: int = 0
+    verified: bool = false
+    is_self: bool = false
+
+    func initials(self) -> str:
+        if len(self.username) >= 2:
+            return self.username[0:2].upper()
+        if len(self.username) == 1:
+            return self.username.upper()
+        return "?"
+
+type Post:
+    id: str
+    user: User
+    caption: str
+    likes: int
+    comments: int
+    time_label: str                 # "2h", "3d", "1w"
+    liked: bool = false
+    saved: bool = false
+    photo_kind: str = "gradient"    # "gradient" | "file"
+    photo_arg: str = "1"            # gradient seed or file path
+    song_id: str = ""              # song id attached to the post (reels)
+    source: str = "local"           # local | fediverse | instagram
+    link: str = ""                  # original URL when remote
+
+type StoryItem:
+    user: User
+    seen: bool = false
+    has_story: bool = true
+
+type NoteItem:
+    id: str
+    user: User
+    text: str
+    song_id: str = ""               # attached song (Wingram songs-in-notes)
+    time_left: str = "5h"           # expiry label (notes live 24h on IG)
+
+type ChatMsg:
+    id: str
+    from_me: bool
+    text: str
+    time_label: str = "12:04"
+
+type Chat:
+    id: str
+    user: User
+    messages: [ChatMsg]
+    unread: int = 0
+
+type Notif:
+    id: str
+    kind: str                       # like | comment | follow | mention
+    user: User
+    text: str
+    time_label: str = "1h"
+    thumb_seed: str = "1"
+
+type Reel:
+    id: str
+    user: User
+    caption: str
+    likes: int
+    comments: int
+    shares: int
+    song_id: str = ""
+    photo_kind: str = "gradient"
+    photo_arg: str = "1"
+
+# ------------------------------------------------------------- demo dataset
+# The local adapter serves this offline dataset so every screen has real
+# content to show on first run.
+
+func demo_users() -> [User]:
+    users = []
+    push(users, User("u1", "maya.codes", "Maya Lindqvist", "initials", "maya", "building tiny tools in Still • coffee first", 18400, 312, true, false))
+    push(users, User("u2", "pixel_pavel", "Pavel Novak", "initials", "pavel", "pixel art & retrowave", 9231, 201, false, false))
+    push(users, User("u3", "arafoods", "Ara Kasparian", "initials", "ara", "recipe tester. sourdough evangelist", 51200, 89, false, false))
+    push(users, User("u4", "north.trails", "Ines Weber", "initials", "north", "trail photos, mostly fog", 7450, 340, false, false))
+    push(users, User("u5", "devtools_daily", "DevTools Daily", "initials", "devtools", "one tool a day", 98100, 42, true, false))
+    push(users, User("u6", "lo.fi.loop", "Kai Mendoza", "initials", "lofi", "beats to compile to", 22300, 156, false, false))
+    return users
+
+func demo_self() -> User:
+    return User("me", "still.dev", "Still Developer", "initials", "self", "building Wingram in the Still language", 342, 180, false, true)
+
+func demo_posts(users: [User]) -> [Post]:
+    posts = []
+    if len(users) < 6:
+        return posts
+    push(posts, Post("p1", users[0], "shipped a whole language feature today — modules typechecking feels great", 412, 38, "2h", true, false, "gradient", "3", "", "local", ""))
+    push(posts, Post("p2", users[1], "new tileset for the side project. 16 colors only!", 289, 21, "4h", false, false, "gradient", "5", "", "local", ""))
+    push(posts, Post("p3", users[2], "72h sourdough, cold ferment. crumb shot in the comments", 1893, 96, "7h", false, true, "gradient", "7", "", "local", ""))
+    push(posts, Post("p4", users[3], "fog on the ridge at 6am. worth the alarm", 731, 44, "1d", false, false, "gradient", "2", "", "local", ""))
+    push(posts, Post("p5", users[4], "today's tool: still emit-c — dump the generated C for any program", 1204, 67, "1d", true, false, "gradient", "9", "", "local", ""))
+    push(posts, Post("p6", users[5], "lo-fi loop pack vol.3 is out — link in bio", 522, 18, "2d", false, false, "gradient", "6", "s1", "local", ""))
+    return posts
+
+func demo_stories(users: [User], me: User) -> [StoryItem]:
+    items = []
+    push(items, StoryItem(me, false, false))     # "your story" slot
+    if len(users) >= 6:
+        for i in range(6):
+            push(items, StoryItem(users[i], i > 3, true))
+    return items
+
+func demo_notes(users: [User]) -> [NoteItem]:
+    notes = []
+    if len(users) >= 6:
+        push(notes, NoteItem("n1", users[1], "playing the new pack all day", "s1", "3h"))
+        push(notes, NoteItem("n2", users[3], "out on the trail, back sunday", "", "5h"))
+        push(notes, NoteItem("n3", users[5], "beats to compile to", "s3", "7h"))
+        push(notes, NoteItem("n4", users[0], "ask me about generics", "", "9h"))
+    return notes
+
+func demo_reels(users: [User]) -> [Reel]:
+    reels = []
+    if len(users) >= 6:
+        push(reels, Reel("r1", users[1], "tileset timelapse", 8410, 210, 96, "s2", "gradient", "5"))
+        push(reels, Reel("r2", users[5], "60 second lo-fi loop tutorial", 15230, 342, 511, "s3", "gradient", "6"))
+        push(reels, Reel("r3", users[3], "ridge run in 15 seconds", 4402, 88, 31, "", "gradient", "2"))
+        push(reels, Reel("r4", users[2], "no-knead in real time", 9980, 156, 203, "s4", "gradient", "7"))
+    return reels
+
+func demo_chats(users: [User]) -> [Chat]:
+    chats = []
+    if len(users) >= 6:
+        c1 = Chat("c1", users[0], [], 2)
+        push(c1.messages, ChatMsg("m1", false, "did you see the new gui module?", "11:58"))
+        push(c1.messages, ChatMsg("m2", true, "yes! drew the whole nav with fill_round", "12:00"))
+        push(c1.messages, ChatMsg("m3", false, "send a screenshot when it builds", "12:02"))
+        push(chats, c1)
+        c2 = Chat("c2", users[2], [], 0)
+        push(c2.messages, ChatMsg("m4", false, "the recipe export works, thanks", "09:30"))
+        push(c2.messages, ChatMsg("m5", true, "told you the notes feature would be handy", "09:41"))
+        push(chats, c2)
+        c3 = Chat("c3", users[5], [], 1)
+        push(c3.messages, ChatMsg("m6", false, "loop pack vol.3 dropping friday", "yesterday"))
+        push(chats, c3)
+    return chats
+
+func demo_notifications(users: [User]) -> [Notif]:
+    ns = []
+    if len(users) >= 6:
+        push(ns, Notif("t1", "like", users[0], "liked your photo.", "1h", "1"))
+        push(ns, Notif("t2", "comment", users[2], 'commented: "this is the future of tiny clients"', "2h", "3"))
+        push(ns, Notif("t3", "follow", users[4], "started following you.", "5h", "9"))
+        push(ns, Notif("t4", "mention", users[1], "mentioned you in a comment.", "1d", "5"))
+        push(ns, Notif("t5", "like", users[3], "and 12 others liked your reel.", "1d", "2"))
+    return ns

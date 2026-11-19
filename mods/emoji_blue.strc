@@ -1,0 +1,18 @@
+# Wingram mod — Classic Blue
+# Restores the classic Instagram blue accent and softens surfaces.
+
+[mod]
+id = classic-blue
+name = Classic Blue
+version = 1.1.0
+author = wingram
+description = Classic Instagram blue with softer panel colors.
+
+[theme]
+accent = 0x0095F6
+surface = 0x121214
+surface2 = 0x1E1E20
+accent_soft = 0x102A42
+
+[features]
+feed_density = default

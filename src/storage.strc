@@ -1,0 +1,76 @@
+# storage — user-generated content persistence (notes you wrote, drafts)
+#
+# Stored as JSON next to the exe (or a writable dir). Uses the stdlib json
+# module — the same parser the adapters use for API responses.
+
+use io
+use json
+use "src/types.strc": User, NoteItem
+
+NOTES_FILE = "wingram_notes.json"
+
+# Save the user's own notes (text + attached song) as JSON.
+func save_my_notes(path: str, notes: [NoteItem]):
+    arr = []
+    for n in notes:
+        item = {}
+        item["id"] = n.id
+        item["user_id"] = n.user.id
+        item["username"] = n.user.username
+        item["text"] = n.text
+        item["song_id"] = n.song_id
+        item["time_left"] = n.time_left
+        push(arr, item)
+    body = {}
+    body["notes"] = arr
+    write_file(path, json.stringify(body))
+
+# Load saved notes; returns false when there is nothing stored yet.
+type LoadNotesResult:
+    ok: bool
+    notes: [NoteItem]
+
+func load_my_notes(path: str) -> LoadNotesResult:
+    if not file_exists(path):
+        return LoadNotesResult(false, [])
+    text = read_file(path)
+    r = json.parse(text)
+    if not r.ok:
+        return LoadNotesResult(false, [])
+    arr = json.get_list(r.value, "notes")
+    notes: [NoteItem] = []
+    for i in range(len(arr)):
+        item = arr[i]
+        uid = json.get_str(item, "user_id", "me")
+        uname = json.get_str(item, "username", "still.dev")
+        u = User(uid, uname, uname, "initials", "self", "", 0, 0, false, uid == "me")
+        n = NoteItem(
+            json.get_str(item, "id", "local"),
+            u,
+            json.get_str(item, "text", ""),
+            json.get_str(item, "song_id", ""),
+            json.get_str(item, "time_left", "24h"))
+        push(notes, n)
+    return LoadNotesResult(true, notes)
+
+# Strip HTML tags from fediverse content down to plain text.
+func strip_html(s: str) -> str:
+    out = ""
+    in_tag = false
+    i = 0
+    while i < len(s):
+        c = s[i]
+        if c == "<":
+            in_tag = true
+        elif c == ">":
+            in_tag = false
+        elif not in_tag:
+            out += c
+        i = i + 1
+    # unescape a handful of common entities
+    out = out.replace("&amp;", "&")
+    out = out.replace("&lt;", "<")
+    out = out.replace("&gt;", ">")
+    out = out.replace("&quot;", "\"")
+    out = out.replace("&#39;", "'")
+    return out

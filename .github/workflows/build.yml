@@ -1,0 +1,71 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate latest Still compiler release
+        id: still
+        shell: pwsh
+        run: |
+          $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/StillAdum/Still/releases/latest"
+          $asset = $rel.assets | Where-Object { $_.name -like "still-*-windows-x64.zip" } | Select-Object -First 1
+          if (-not $asset) { throw "no windows zip asset found in $($rel.tag_name)" }
+          "zip=$($asset.browser_download_url)" >> $env:GITHUB_OUTPUT
+          "tag=$($rel.tag_name)" >> $env:GITHUB_OUTPUT
+          Write-Host "Using Still $($rel.tag_name) -> $($asset.browser_download_url)"
+
+      - name: Install Still compiler
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "${{ steps.still.outputs.zip }}" -OutFile still.zip
+          Expand-Archive still.zip -DestinationPath stilltool
+          Add-Content $env:GITHUB_PATH "$PWD\stilltool"
+          & "$PWD\stilltool\still.exe" version
+
+      - name: Install portable C compiler (tcc)
+        shell: pwsh
+        run: still setup-cc
+
+      - name: Typecheck
+        shell: pwsh
+        run: still check wingram.strc
+
+      - name: Build wingram.exe
+        shell: pwsh
+        run: still build wingram.strc -o wingram.exe --release
+
+      - name: Headless selftest
+        shell: pwsh
+        run: ./wingram.exe --selftest
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wingram-windows-x64
+          path: wingram.exe
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: wingram.exe
+          body: |
+            Wingram build for ${{ github.ref_name }}.
+            Compiled with Still ${{ steps.still.outputs.tag }} (windows-x64, portable tcc).
+
+            Run wingram.exe — on first launch Windows SmartScreen may warn
+            (unsigned binary); choose More info -> Run anyway.

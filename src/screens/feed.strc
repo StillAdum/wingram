@@ -1,0 +1,267 @@
+# screen_feed — the home feed: notes tray (with songs), stories row, posts
+#
+# Layout follows instagram.com web: a centered ~630px column with the notes
+# tray on top (Wingram's songs-in-notes feature lives here), the story tray
+# under it, then post cards. The left nav rail is drawn by the main loop.
+
+use gui
+use media
+use "src/theme.strc"
+use "src/types.strc": User, Post, NoteItem, StoryItem
+use "src/songs.strc"
+use "src/ui_kit.strc"
+use "src/app.strc"
+use "src/adapters.strc"
+
+NOTES_TRAIL_H = 92
+STORY_H = 108
+
+func render(app: App) -> App:
+    win = app.win
+    t = app.theme
+    top = 12.0
+    app = render_notes_tray(app, top)
+    top = top + float(NOTES_TRAIL_H)
+    app = render_stories(app, top)
+    top = top + float(STORY_H)
+    render_posts(app, top)
+    return app
+
+# ------------------------------------------------------------- notes tray
+# Note bubbles are drawn above the stories row, like the mobile app. Each
+# bubble can carry a song sticker; clicking the sticker previews the song.
+
+func render_notes_tray(app: App, y: float) -> App:
+    win = app.win
+    t = app.theme
+    x0 = 24.0
+    cx = x0 + 26.0
+    # "your note" slot first
+    draw_add_note(app, cx, y + 34.0)
+    cx = cx + 64.0
+    for i in range(len(app.notes)):
+        n = app.notes[i]
+        u = n.user
+        rad = 24.0
+        draw_avatar(win, t, u, cx, y + 34.0, rad, false, false)
+        # bubble above the avatar
+        bubble_w = bubble_width(n)
+        bx = cx - bubble_w / 2.0
+        by = y - 4.0
+        bcol = t.note_other
+        if u.is_self:
+            bcol = t.note_self
+        gui.fill_round(win, bx, by, bubble_w, 34.0, 17.0, bcol)
+        gui.clip_push(win, bx + 2.0, by, bubble_w - 4.0, 34.0)
+        if n.song_id != "":
+            # song note: music icon + title (mobile-style music note)
+            s = app.catalog.find(n.song_id)
+            icon_music(win, t, bx + 8.0, by + 9.0, 14.0, t.sticker_b)
+            gui.text_bold(win, bx + 26.0, by + 9.0, s.title, t.text, 12)
+        else:
+            gui.text(win, bx + 12.0, by + 9.0, n.text, t.text, 12)
+        gui.clip_pop(win)
+        # username under avatar
+        gui.text(win, cx - 22.0, y + 66.0, u.username, t.text_dim, 11)
+        # interactions
+        if n.song_id != "":
+            # click the bubble: play/stop preview
+            if click_zone(win, bx, by, bubble_w, 34.0):
+                if app.preview_song == n.song_id and app.preview_playing:
+                    stop_preview()
+                    app.preview_playing = false
+                    app.preview_song = ""
+                    app.toast_for("preview stopped", 1.5)
+                else:
+                    if play_preview(app.catalog, n.song_id):
+                        app.preview_song = n.song_id
+                        app.preview_playing = true
+                        s = app.catalog.find(n.song_id)
+                        app.toast_for("playing {s.title} — {s.artist}", 2.5)
+                    else:
+                        app.toast_for("audio backend unavailable (needs Windows)", 2.5)
+        else:
+            if click_zone(win, bx - 8.0, by - 8.0, bubble_w + 16.0, 50.0):
+                app.toast_for("{u.username}: {n.text}", 2.5)
+        cx = cx + 64.0
+    return app
+
+func bubble_width(n: NoteItem) -> float:
+    # capped bubble width
+    w = 40.0
+    if n.song_id != "":
+        w = 120.0
+    else:
+        w = float(len(n.text)) * 7.0 + 24.0
+    if w > 150.0:
+        w = 150.0
+    if w < 48.0:
+        w = 48.0
+    return w
+
+func draw_add_note(app: App, cx: float, cy: float):
+    win = app.win
+    t = app.theme
+    draw_avatar(win, t, app.me, cx, cy, 24.0, false, false)
+    gui.text(win, cx - 22.0, cy + 32.0, "your note", t.text_dim, 11)
+    if click_zone(win, cx - 26.0, cy - 26.0, 52.0, 52.0):
+        app.screen = "notes"
+        app.picker_open = false
+        app.compose_text = ""
+        app.compose_song = ""
+        app.compose_focus = false
+
+# ------------------------------------------------------------- stories row
+
+func render_stories(app: App, y: float) -> App:
+    win = app.win
+    t = app.theme
+    cx = 24.0 + 26.0
+    for i in range(len(app.stories)):
+        item = app.stories[i]
+        u = item.user
+        is_self = i == 0
+        draw_avatar(win, t, u, cx, y + 34.0, 26.0, item.has_story, item.seen)
+        label = "your story"
+        if not is_self:
+            label = u.username
+        gui.text(win, cx - 24.0, y + 72.0, label, t.text_dim, 11)
+        if click_zone(win, cx - 32.0, y, 64.0, 96.0):
+            if is_self:
+                app.screen = "notes"
+                app.picker_open = false
+                app.compose_text = ""
+                app.compose_song = ""
+                app.compose_focus = false
+            else:
+                app.story_index = i
+                app.story_open = true
+                app.story_started = clock()
+        cx = cx + 72.0
+    return app
+
+# ------------------------------------------------------------- post cards
+
+func render_posts(app: App, top: float) -> App:
+    win = app.win
+    t = app.theme
+    x0 = 24.0
+    w = float(t.center_w)
+    y = top + 8.0
+    # scroll handling: wheel scrolls the whole feed
+    content_h = feed_content_height(app, x0, y)
+    view_h = float(gui.height(win)) - y - 8.0
+    offset = float(app.scroll_of("feed"))
+    if view_h < 0.0:
+        view_h = 0.0
+    max_off = content_h - view_h
+    if max_off < 0.0:
+        max_off = 0.0
+    wheel = gui.wheel_delta(win)
+    if wheel != 0:
+        offset = offset - float(wheel) * 1.2
+    if offset < 0.0:
+        offset = 0.0
+    if offset > max_off:
+        offset = max_off
+    app.set_scroll("feed", int(offset))
+
+    gui.clip_push(win, x0, y, w, view_h)
+    cy = y - offset
+    for i in range(len(app.posts)):
+        p = app.posts[i]
+        card_h = 42.0 + 560.0 + 118.0
+        if cy + float(card_h) >= y and cy <= y + view_h:
+            app = render_post_card(app, p, i, x0, cy, w)
+        cy = cy + float(card_h) + 24.0
+    gui.clip_pop(win)
+    return app
+
+func feed_content_height(app: App, x0: float, y: float) -> float:
+    n = len(app.posts)
+    return y + float(n) * (42.0 + 560.0 + 118.0 + 24.0) + 80.0
+
+func render_post_card(app: App, p: Post, idx: int, x: float, y: float, w: float) -> App:
+    win = app.win
+    t = app.theme
+    # header
+    draw_avatar(win, t, p.user, x + 26.0, y + 21.0, 15.0, false, false)
+    draw_username(win, t, p.user, x + 50.0, y + 13.0, 14.0)
+    gui.text(win, x + 50.0 + float(gui.text_width(win, p.user.username, 14)) + 12.0, y + 14.0, "• {p.time_label}", t.text_dim, 13)
+    if p.source != "local":
+        gui.text(win, x + w - 120.0, y + 15.0, "via {p.source}", t.text_faint, 11)
+    if click_zone(win, x, y, w, 42.0):
+        app.screen = "profile"
+        app.profile_user = p.user.username
+    # media: gradient art by seed, or a real file from assets/ when present
+    mx = x
+    my = y + 42.0
+    pair = gradient_pair(p.photo_arg)
+    path = "assets/photo_{p.id}.jpg"
+    drew_file = false
+    if file_exists(path):
+        img = 0
+        if path in app.img_cache:
+            img = app.img_cache.get(path, 0)
+        else:
+            img = media.load(path)
+            app.img_cache[path] = img
+        if img != 0:
+            gui.draw_image(win, img, mx, my, w, 560.0)
+            drew_file = true
+    if not drew_file:
+        draw_gradient_rect(win, mx, my, w, 560.0, pair.0, pair.1, 24)
+        # simple art: a few soft circles seeded by the photo
+        h = seed_hash(p.photo_arg + p.id)
+        for k in range(3):
+            fx = float(h % 1000) / 1000.0
+            fy = float((h / 7 + k * 311) % 997) / 997.0
+            crad = 60.0 + float((h + k * 53) % 120)
+            gui.fill_circle(win, mx + 60.0 + fx * (w - 120.0), my + 80.0 + fy * 400.0, crad, lerp_color(pair.1, pair.0, 0.35))
+        gui.text_bold(win, mx + w / 2.0 - 60.0, my + 270.0, "Wingram", lerp_color(0xFFFFFF, pair[0], 0.55), 40)
+    # action row
+    ay = my + 560.0 + 12.0
+    ax = x + 12.0
+    like_col = t.text
+    if p.liked:
+        like_col = t.like
+    icon_heart(win, t, ax, ay, 24.0, like_col)
+    if click_zone(win, ax, ay, 30.0, 30.0):
+        app = toggle_like(app, idx)
+    icon_comment(win, t, ax + 34.0, ay, 24.0, t.text)
+    if click_zone(win, ax + 34.0, ay, 30.0, 30.0):
+        app.toast_for("comments are read-only in v0.1", 2.0)
+    icon_send(win, t, ax + 68.0, ay, 24.0, t.text)
+    if click_zone(win, ax + 68.0, ay, 30.0, 30.0):
+        app.toast_for("sharing arrives in v0.2", 2.0)
+    save_x = x + w - 40.0
+    icon_bookmark(win, t, save_x, ay, 24.0, p.saved, t.text)
+    if click_zone(win, save_x - 4.0, ay, 32.0, 32.0):
+        p.saved = not p.saved
+    # likes + caption
+    ly = ay + 34.0
+    likes_label = "{p.likes} likes"
+    gui.text_bold(win, x + 12.0, ly, likes_label, t.text, 14)
+    gui.text(win, x + 12.0, ly + 22.0, "{p.user.username}  {p.caption}", t.text, 14)
+    gui.clip_push(win, x, ly + 20.0, w, 22.0)
+    gui.text(win, x + 12.0, ly + 22.0, "", t.text, 14)
+    gui.clip_pop(win)
+    if p.song_id != "":
+        s = app.catalog.find(p.song_id)
+        icon_music(win, t, x + 12.0, ly + 48.0, 14.0, t.sticker_b)
+        gui.text(win, x + 32.0, ly + 49.0, "{s.artist} • {s.title}", t.text_dim, 12)
+    return app
+
+func toggle_like(app: App, idx: int) -> App:
+    if idx < 0 or idx >= len(app.posts):
+        return app
+    p = app.posts[idx]
+    if p.liked:
+        p.liked = false
+        p.likes = p.likes - 1
+    else:
+        p.liked = true
+        p.likes = p.likes + 1
+    app.posts[idx] = p
+    return app
+

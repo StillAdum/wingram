@@ -1,0 +1,55 @@
+# theme — Wingram visual theme (instagram.com web client, dark) + mod support
+#
+# Default palette mirrors instagram.com dark mode. Every color can be
+# overridden by mods via the [theme] section — see MODS.md.
+
+type Theme:
+    bg: int = 0x000000          # app background
+    surface: int = 0x101418     # panels, cards
+    surface2: int = 0x1A1D21    # inputs, hover
+    border: int = 0x262626      # hairlines
+    text: int = 0xF5F5F5        # primary text
+    text_dim: int = 0xA8A8A8    # secondary text
+    text_faint: int = 0x737373  # timestamps, placeholders
+    accent: int = 0x0095F6      # IG blue (buttons, active nav, links)
+    accent_soft: int = 0x12253A # pressed/selected backgrounds
+    like: int = 0xFF3040        # heart red
+    badge: int = 0xFF3040       # notification dot
+    online: int = 0x22C55E      # online dot
+    note_self: int = 0x2A3B52   # own note bubble
+    note_other: int = 0x262626  # other note bubble
+    sticker_a: int = 0x7C3AED   # music sticker gradient start
+    sticker_b: int = 0xDB2777   # music sticker gradient end
+    nav_w: int = 220            # left nav rail width (web layout)
+    center_w: int = 630         # feed column width
+    radius: int = 8             # default corner radius
+
+func make_theme() -> Theme:
+    return Theme()
+
+# hex "0xRRGGBB" / "#RRGGBB" -> int color (0 on parse failure)
+func parse_color(s: str) -> int:
+    t = s.trim()
+    if t.starts("0x") or t.starts("0X"):
+        t = t[2:]
+    elif t.starts("#"):
+        t = t[1:]
+    if len(t) != 6:
+        return 0
+    hi = hex_digit_at(t[0]) * 16 + hex_digit_at(t[1])
+    mid = hex_digit_at(t[2]) * 16 + hex_digit_at(t[3])
+    lo = hex_digit_at(t[4]) * 16 + hex_digit_at(t[5])
+    if hi < 0 or mid < 0 or lo < 0:
+        return 0
+    return hi * 65536 + mid * 256 + lo
+
+func hex_digit_at(c: str) -> int:
+    digits = "0123456789abcdef"
+    for i in range(16):
+        if c == digits[i]:
+            return i
+    caps = "ABCDEF"
+    for i in range(6):
+        if c == caps[i]:
+            return 10 + i
+    return -1

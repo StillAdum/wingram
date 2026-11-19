@@ -1,0 +1,359 @@
+# wingram — a PC Instagram-style client written entirely in Still
+#
+# Requires the Still 0.6.1+ runtime (gui/net/audio/media/json + read_dir).
+# Layout mirrors instagram.com web: top bar, left nav rail, centered column.
+#
+# Usage:
+#   still run wingram.strc            (dev, via tcc)
+#   wingram.exe                       (release build)
+#   wingram.exe --selftest            (headless logic checks, no window)
+
+use gui
+use json
+use media
+use "src/theme.strc"
+use "src/types.strc"
+use "src/songs.strc"
+use "src/mods_engine.strc"
+use "src/storage.strc": NOTES_FILE
+use "src/adapters.strc"
+use "src/app.strc"
+use "src/ui_kit.strc"
+use "src/screens/feed.strc"
+use "src/screens/explore.strc"
+use "src/screens/reels.strc"
+use "src/screens/notes.strc"
+use "src/screens/dm.strc"
+use "src/screens/profile.strc"
+use "src/screens/notifications.strc"
+use "src/screens/settings.strc"
+
+W = 1280
+H = 832
+NAV_W = 220
+
+func main():
+    argv = args()
+    for i in range(len(argv)):
+        if argv[i] == "--selftest":
+            exit(selftest())
+
+    if not gui.available():
+        print("wingram needs a display backend (gui module requires Windows in this build)")
+        exit(1)
+
+    win = gui.open_window("Wingram", W, H)
+    if win == 0:
+        print("could not open the main window")
+        exit(1)
+    app = make_app(win)
+
+    # mods first: they can retheme everything
+    app.mods.scan()
+    cfg = load_config("config.ini")
+    app.settings_cfg = cfg
+    app.mods = apply_config(app.mods, cfg)
+    app.theme = app.mods.apply_theme(make_theme())
+    app.adapter.instance = cfg.get("account.fediverse_instance", app.adapter.instance)
+    app.adapter.ig_sessionid = cfg.get("account.instagram_sessionid", "")
+    app.adapter.ig_ds_user_id = ig_extract_user_id(app.adapter.ig_sessionid)
+    app.ig_target = cfg.get("account.ig_target", app.ig_target)
+    saved = load_my_notes(NOTES_FILE)
+    if saved.ok and len(saved.notes) > 0:
+        app.notes = saved.notes
+
+    app.toast_for("welcome to wingram — mods loaded: {len(app.mods.mods)}", 3.0)
+
+    while app.running and gui.window_open(win):
+        if gui.begin_frame(win):
+            t = app.theme
+            gui.set_bg(win, t.bg)
+            draw_top_bar(app)
+            nav_x = 24.0
+            nav_y = 46.0
+            nav_h = float(H) - nav_y - 8.0
+            goto = draw_nav_rail(win, t, nav_x, nav_y, float(NAV_W), nav_h, app.screen, app.me, app.unread_dms(), len(app.notifs))
+            if goto != "":
+                app = handle_nav(app, goto)
+            content_x = float(NAV_W) + 48.0
+            app = route_screen(app, content_x)
+            draw_toast(app)
+            app = handle_story_viewer(app)
+            app = check_reload(app)
+            gui.end_frame(win)
+        else:
+            # window was closed inside begin_frame's pump
+            break
+        sleep_ms(16)
+    gui.close_window(win)
+    persist(app)
+
+func persist(app: App):
+    save_config("config.ini", app.mods, app.settings_cfg)
+    save_my_notes(NOTES_FILE, app.notes)
+
+func handle_nav(nav_app: App, target: str) -> App:
+    if target == "home":
+        nav_app.screen = "feed"
+    elif target == "search":
+        nav_app.screen = "explore"
+        nav_app.search_focus = true
+    elif target == "explore":
+        nav_app.screen = "explore"
+    elif target == "reels":
+        nav_app.screen = "reels"
+    elif target == "messages":
+        nav_app.screen = "dm"
+    elif target == "notifications":
+        nav_app.screen = "notifications"
+    elif target == "create":
+        nav_app.screen = "notes"
+        nav_app.picker_open = false
+        nav_app.compose_text = ""
+        nav_app.compose_song = ""
+        nav_app.compose_focus = false
+    elif target == "profile":
+        nav_app.screen = "profile"
+        nav_app.profile_user = ""
+    elif target == "settings":
+        nav_app.screen = "settings"
+    return nav_app
+
+func route_screen(route_app: App, x: float) -> App:
+    win = route_app.win
+    gui.clip_push(win, x, 46.0, float(gui.width(win)) - x - 8.0, float(gui.height(win)) - 54.0)
+    s = route_app.screen
+    if s == "feed":
+        route_app = feed.render(route_app)
+    elif s == "explore" or s == "search":
+        route_app = explore.render(route_app)
+    elif s == "reels":
+        route_app = reels.render(route_app)
+    elif s == "notes":
+        route_app = notes.render(route_app)
+    elif s == "dm":
+        route_app = dm.render(route_app)
+    elif s == "profile":
+        route_app = profile.render(route_app)
+    elif s == "notifications":
+        route_app = notifications.render(route_app)
+    elif s == "settings":
+        route_app = settings.render(route_app)
+    else:
+        gui.text(win, x + 20.0, 80.0, "unknown screen: {s}", route_app.theme.text_dim, 14)
+    gui.clip_pop(win)
+    return route_app
+
+# web-style top bar: logo chip + backend status
+func draw_top_bar(top_app: App):
+    win = top_app.win
+    t = top_app.theme
+    gui.fill_rect(win, 0.0, 0.0, float(gui.width(win)), 44.0, t.surface)
+    gui.fill_rect(win, 0.0, 44.0, float(gui.width(win)), 1.0, t.border)
+    gui.text_bold(win, 24.0, 12.0, "Wingram", t.text, 18)
+    mode_label = top_app.adapter.mode
+    if mode_label == "local":
+        mode_label = "local demo data"
+    elif mode_label == "fediverse":
+        mode_label = "fediverse: {top_app.adapter.instance}"
+    elif mode_label == "instagram":
+        mode_label = "instagram (experimental)"
+    gui.text(win, 130.0, 17.0, mode_label, t.text_dim, 12)
+    esc_hint = "esc to close"
+    w = float(gui.text_width(win, esc_hint, 11))
+    gui.text(win, float(gui.width(win)) - w - 16.0, 18.0, esc_hint, t.text_faint, 11)
+
+func draw_toast(app: App):
+    if app.toast == "":
+        return
+    if clock() > app.toast_until:
+        app.toast = ""
+        return
+    win = app.win
+    t = app.theme
+    w = float(gui.text_width(win, app.toast, 13)) + 32.0
+    x = (float(gui.width(win)) - w) / 2.0
+    gui.fill_round(win, x, float(gui.height(win)) - 56.0, w, 36.0, 10.0, lerp_color(t.surface, 0x000000, 0.25))
+    gui.text(win, x + 16.0, float(gui.height(win)) - 46.0, app.toast, t.text, 13)
+
+# fullscreen story viewer overlay
+func handle_story_viewer(app: App) -> App:
+    if not app.story_open:
+        return app
+    win = app.win
+    t = app.theme
+    idx = app.story_index
+    if idx < 0 or idx >= len(app.stories):
+        app.story_open = false
+        return app
+    item = app.stories[idx]
+    u = item.user
+    pair = gradient_pair("story" + u.username)
+    gui.fill_rect(win, 0.0, 0.0, float(gui.width(win)), float(gui.height(win)), lerp_color(0x000000, pair.0, 0.85))
+    cw = 420.0
+    ch = 640.0
+    cx = (float(gui.width(win)) - cw) / 2.0
+    cy = (float(gui.height(win)) - ch) / 2.0
+    draw_gradient_rect(win, cx, cy, cw, ch, pair.0, pair.1, 24)
+    # progress bar
+    prog = (clock() - app.story_started) / 5.0
+    if prog > 1.0:
+        app.story_open = false
+        item.seen = true
+        app.stories[idx] = item
+        return app
+    gui.fill_rect(win, cx + 12.0, cy + 12.0, (cw - 24.0) * prog, 3.0, 0xFFFFFF)
+    draw_avatar(win, t, u, cx + 36.0, cy + 40.0, 16.0, false, false)
+    gui.text_bold(win, cx + 62.0, cy + 30.0, u.username, 0xFFFFFF, 15)
+    gui.text(win, cx + 62.0, cy + 50.0, "{int(prog * 5.0)}s", lerp_color(0xFFFFFF, pair.1, 0.4), 12)
+    gui.text_bold(win, cx + cw / 2.0 - 60.0, cy + ch / 2.0 - 10.0, u.username, lerp_color(0xFFFFFF, pair.0, 0.5), 42)
+    gui.text(win, cx + 20.0, cy + ch - 30.0, "click anywhere to close", lerp_color(0xFFFFFF, pair.1, 0.5), 12)
+    if gui.mouse_clicked(win) or gui.key_pressed(win, gui.VK_ESCAPE):
+        item.seen = true
+        app.stories[idx] = item
+        app.story_open = false
+    return app
+
+func check_reload(app: App) -> App:
+    if not app.reload_requested:
+        return app
+    app.reload_requested = false
+    if app.adapter.mode == "fediverse":
+        fr = refresh_feed(app.adapter, app.ig_target)
+        if fr.ok:
+            app.users = fr.users
+            app.posts = fr.posts
+            app.toast_for("loaded {len(fr.posts)} posts from the fediverse", 2.5)
+        else:
+            app.toast_for("fediverse failed: {app.adapter.last_error}", 3.0)
+    elif app.adapter.mode == "instagram":
+        if app.adapter.ig_sessionid == "":
+            app.toast_for("paste your instagram sessionid in config.ini first", 3.0)
+        else:
+            fr = refresh_feed(app.adapter, app.ig_target)
+            if fr.ok:
+                app.users = fr.users
+                app.posts = fr.posts
+                app.toast_for("loaded {len(fr.posts)} instagram posts", 2.5)
+            else:
+                app.toast_for("instagram failed: {app.adapter.last_error}", 3.5)
+    else:
+        app.toast_for("local demo data active", 2.0)
+    return app
+
+# ------------------------------------------------------------- selftest
+# Headless verification of the logic layer: JSON round-trips, mod parsing,
+# config persistence, catalog integrity, model invariants. Exits 0 on pass.
+
+func selftest() -> int:
+    print("wingram selftest")
+    fails = 0
+
+    # json round-trip
+    r = json_parse_test()
+    if not r:
+        print("FAIL json round-trip")
+        fails = fails + 1
+
+    # mods: parse a sample mod text and check values
+    sample = "[mod]\nid = test-mod\nname = Test Mod\nversion = 1.2.0\nauthor = tester\ndescription = a test\n\n[theme]\naccent = 0x7C3AED\n\n[features]\nfeed_density = compact"
+    m = parse_mod("mods/test.strc", sample)
+    if m.id != "test-mod" or m.name != "Test Mod" or m.version != "1.2.0":
+        print("FAIL mod parse fields")
+        fails = fails + 1
+    eng = ModEngine([m], "mods")
+    eng.set_enabled("test-mod", true)
+    if eng.value("theme", "accent", "") != "0x7C3AED":
+        print("FAIL mod theme value lookup")
+        fails = fails + 1
+    if not eng.has_feature("feed_density", "compact"):
+        print("FAIL mod feature lookup")
+        fails = fails + 1
+    t = eng.apply_theme(make_theme())
+    if t.accent != 0x7C3AED:
+        print("FAIL mod theme apply")
+        fails = fails + 1
+
+    # config persistence round-trip
+    save_config("selftest_config.ini", eng, {"backend": "fediverse"})
+    cfg = load_config("selftest_config.ini")
+    if cfg.get("mods.enabled", "") != "test-mod":
+        print("FAIL config save/load")
+        fails = fails + 1
+
+    # catalog integrity: every melody must parse as freq:ms pairs
+    cat = make_catalog()
+    if cat.count() < 5:
+        print("FAIL catalog too small")
+        fails = fails + 1
+    for i in range(cat.count()):
+        s = cat.songs[i]
+        if not melody_spec_valid(s.melody):
+            print("FAIL melody spec: {s.id}")
+            fails = fails + 1
+
+    # models: demo data invariants
+    users = demo_users()
+    posts = demo_posts(users)
+    if len(posts) != 6:
+        print("FAIL demo posts count")
+        fails = fails + 1
+    notes = demo_notes(users)
+    song_notes = 0
+    for i in range(len(notes)):
+        if notes[i].song_id != "":
+            song_notes = song_notes + 1
+    if song_notes < 2:
+        print("FAIL demo notes with songs")
+        fails = fails + 1
+
+    # sessionid parsing (instagrapi-style leading digits)
+    uid = ig_extract_user_id("1234567890abcdef123456")
+    if uid != "1234567890":
+        print("FAIL sessionid user id extraction")
+        fails = fails + 1
+
+    # color parsing
+    if parse_color("0x0095F6") != 0x0095F6 or parse_color("#FF3040") != 0xFF3040:
+        print("FAIL color parsing")
+        fails = fails + 1
+
+    if fails == 0:
+        print("selftest PASS ({cat.count()} songs, {len(users)} demo users, mods engine ok)")
+        return 0
+    print("selftest FAILED: {fails} checks")
+    return 1
+
+func json_parse_test() -> bool:
+    text = "{{\"a\": 1, \"b\": \"two\", \"c\": [true, null, 2.5]}}"
+    r = json.parse(text)
+    if not r.ok:
+        return false
+    if json.get_int(r.value, "a", -1) != 1:
+        return false
+    if json.get_str(r.value, "b", "") != "two":
+        return false
+    arr = json.get_list(r.value, "c")
+    if len(arr) != 3:
+        return false
+    out = json.stringify(r.value)
+    r2 = json.parse(out)
+    return r2.ok
+
+func melody_spec_valid(spec: str) -> bool:
+    if spec == "":
+        return false
+    parts = spec.split(",")
+    if len(parts) < 3:
+        return false
+    for i in range(len(parts)):
+        kv = parts[i].split(":")
+        if len(kv) != 2:
+            return false
+        f = float(kv[0])
+        ms = int(kv[1])
+        if f < 0.0 or ms <= 0:
+            return false
+    return true
+
+main()

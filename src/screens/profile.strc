@@ -1,0 +1,101 @@
+# screen_profile — profile header with stats and a post grid
+
+use gui
+use "src/theme.strc"
+use "src/types.strc": User, Post
+use "src/ui_kit.strc"
+use "src/app.strc"
+use "src/adapters.strc"
+
+func render(app: App) -> App:
+    win = app.win
+    t = app.theme
+    x0 = 24.0
+    y = 20.0
+    # resolve the profile user
+    target = app.profile_user
+    u = find_user(app, target)
+    if u.id == "" and target == "":
+        u = app.me
+    if u.id == "":
+        gui.text_bold(win, x0, y, "Profile", t.text, 24)
+        gui.text(win, x0, y + 40.0, "no profile selected", t.text_dim, 14)
+        return app
+    # header
+    draw_avatar(win, t, u, x0 + 54.0, y + 54.0, 42.0, false, false)
+    name_x = x0 + 120.0
+    draw_username(win, t, u, name_x, y + 18.0, 20)
+    # stats row: posts / followers / following
+    stats_x = name_x + float(gui.text_width(win, u.username, 20)) + 24.0
+    posts_n = count_posts_of(app, u)
+    stat1 = "{posts_n} posts"
+    stat2 = "{u.followers} followers"
+    stat3 = "{u.following} following"
+    gui.text(win, stats_x, y + 24.0, stat1, t.text, 15)
+    gui.text(win, stats_x + 90.0, y + 24.0, stat2, t.text, 15)
+    gui.text(win, stats_x + 210.0, y + 24.0, stat3, t.text, 15)
+    # full name + bio
+    if u.full_name != "":
+        gui.text_bold(win, name_x, y + 52.0, u.full_name, t.text, 14)
+    if u.bio != "":
+        gui.text(win, name_x, y + 74.0, u.bio, t.text_dim, 13)
+    # actions
+    ay = y + 110.0
+    if u.is_self:
+        if draw_button(win, t, name_x, ay, 130.0, 36.0, "edit profile", false):
+            app.toast_for("profile editing arrives in v0.2", 2.0)
+        if draw_button(win, t, name_x + 140.0, ay, 130.0, 36.0, "settings", false):
+            app.screen = "settings"
+    else:
+        if draw_button(win, t, name_x, ay, 130.0, 36.0, "follow", true):
+            app.toast_for("following is read-only in v0.1", 2.0)
+        if draw_button(win, t, name_x + 140.0, ay, 130.0, 36.0, "message", false):
+            app.screen = "dm"
+    if u.id != app.me.id:
+        if draw_button(win, t, name_x + 290.0, ay, 130.0, 36.0, "back", false):
+            app.screen = "feed"
+    y = ay + 60.0
+    # tabs
+    gui.fill_rect(win, x0, y, float(t.center_w) + 200.0, 1.0, t.border)
+    gui.fill_rect(win, x0, y, 120.0, 2.0, t.text)
+    gui.text_bold(win, x0 + 34.0, y + 10.0, "POSTS", t.text, 13)
+    gui.text(win, x0 + 154.0, y + 10.0, "REELS", t.text_dim, 13)
+    gui.text(win, x0 + 254.0, y + 10.0, "TAGGED", t.text_dim, 13)
+    y = y + 36.0
+    # grid of this user's posts
+    cell = 130.0
+    gap = 6.0
+    cols = 4
+    shown = 0
+    for i in range(len(app.posts)):
+        p = app.posts[i]
+        if p.user.id != u.id:
+            continue
+        col = shown % cols
+        row = shown / cols
+        cx = x0 + float(col) * (cell + gap)
+        cy = y + float(row) * (cell + gap)
+        pair = gradient_pair(p.photo_arg)
+        gui.fill_rect(win, cx, cy, cell, cell, pair.0)
+        if p.song_id != "":
+            gui.fill_round(win, cx + 8.0, cy + cell - 34.0, 100.0, 24.0, 12.0, lerp_color(0x000000, pair.1, 0.4))
+            icon_music(win, t, cx + 14.0, cy + cell - 30.0, 14.0, 0xFFFFFF)
+        shown = shown + 1
+    if shown == 0:
+        gui.text(win, x0, y + 20.0, "no posts yet", t.text_dim, 14)
+    return app
+
+func find_user(app: App, username: str) -> User:
+    for u in app.users:
+        if u.username == username:
+            return u
+    if app.me.username == username:
+        return app.me
+    return User("", "", "", "initials", "", "", 0, 0, false, false)
+
+func count_posts_of(app: App, u: User) -> int:
+    n = 0
+    for p in app.posts:
+        if p.user.id == u.id:
+            n = n + 1
+    return n

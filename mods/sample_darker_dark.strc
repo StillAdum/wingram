@@ -1,0 +1,25 @@
+# Wingram mod — Darker Dark
+# A deeper dark theme with a violet accent. Drop .strc mods into the mods/
+# folder and toggle them in Settings -> Mods. See MODS.md for the format.
+
+[mod]
+id = darker-dark
+name = Darker Dark
+version = 1.0.0
+author = wingram
+description = Deepens the dark theme and switches the accent to violet.
+
+[theme]
+bg = 0x050507
+surface = 0x0B0B0F
+surface2 = 0x14141B
+border = 0x1C1C24
+accent = 0x8B5CF6
+accent_soft = 0x1C1633
+text = 0xEDEDF2
+text_dim = 0x9A9AB0
+note_self = 0x241B3D
+
+[features]
+feed_density = comfortable
+note_songs = on

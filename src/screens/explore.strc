@@ -1,0 +1,56 @@
+# screen_explore — the explore/search screen: search box + photo grid
+#
+# The grid reuses post gradient art. Search filters local posts and demos
+# the search UX; fediverse search arrives with the v0.2 adapter work.
+
+use gui
+use "src/theme.strc"
+use "src/types.strc": User, Post
+use "src/ui_kit.strc"
+use "src/app.strc"
+use "src/adapters.strc"
+
+func render(app: App) -> App:
+    win = app.win
+    t = app.theme
+    x0 = 24.0
+    w = float(t.center_w) + 200.0
+    y = 20.0
+    gui.text_bold(win, x0, y, "Explore", t.text, 24)
+    y = y + 44.0
+    box_w = 300.0
+    q, f = text_input_box(win, t, x0, y, box_w, 40.0, app.search_query, app.search_focus, "search Wingram")
+    app.search_query = q
+    app.search_focus = f
+    app.search_query = apply_typed(win, app.search_query, app.search_focus)
+    y = y + 56.0
+    # grid
+    cell = 118.0
+    gap = 4.0
+    cols = int((w - 24.0) / (cell + gap))
+    if cols < 3:
+        cols = 3
+    shown = 0
+    query = app.search_query.lower().trim()
+    for i in range(len(app.posts)):
+        p = app.posts[i]
+        if query != "" and not (p.caption.lower().contains(query) or p.user.username.lower().contains(query)):
+            continue
+        col = shown % cols
+        row = shown / cols
+        cx = x0 + float(col) * (cell + gap)
+        cy = y + float(row) * (cell + gap)
+        pair = gradient_pair(p.photo_arg)
+        gui.fill_rect(win, cx, cy, cell, cell, pair.0)
+        gui.fill_round(win, cx + cell / 2.0 - 22.0, cy + cell / 2.0 - 22.0, 44.0, 44.0, 8.0, lerp_color(pair.1, 0xFFFFFF, 0.25))
+        # likes label on hover
+        if hovered(win, cx, cy, cell, cell):
+            gui.fill_rect(win, cx, cy + cell - 24.0, cell, 24.0, lerp_color(0x000000, pair.1, 0.25))
+            gui.text_bold(win, cx + 8.0, cy + cell - 20.0, "{p.likes} likes", 0xFFFFFF, 12)
+        if click_zone(win, cx, cy, cell, cell):
+            app.screen = "profile"
+            app.profile_user = p.user.username
+        shown = shown + 1
+    if shown == 0:
+        gui.text(win, x0, y + 20.0, "no results for \"{query}\"", t.text_dim, 14)
+    return app

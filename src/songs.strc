@@ -1,0 +1,79 @@
+# songs — Wingram's built-in song catalog for notes and reels
+#
+# Every song carries a melody spec ("freq:ms,..." pairs) so previews can be
+# synthesized at runtime with the audio module — no audio assets needed.
+# Melodies are original, hand-composed note sequences (not copyrighted
+# recordings); they exist to make song previews audible on every machine.
+
+
+use audio
+
+type Song:
+    id: str
+    title: str
+    artist: str
+    duration_s: int                 # seconds, shown on the sticker
+    melody: str                     # audio.play_melody spec "freq:ms,..."
+    cover_a: int = 0x7C3AED         # sticker gradient start
+    cover_b: int = 0xDB2777         # sticker gradient end
+
+type SongCatalog:
+    songs: [Song]
+
+    func find(self, id: str) -> Song:
+        for s in self.songs:
+            if s.id == id:
+                return s
+        return Song("", "(unknown)", "", 0, "", 0x7C3AED, 0xDB2777)
+
+    func search(self, query: str) -> [Song]:
+        q = query.lower().trim()
+        res = []
+        for s in self.songs:
+            if q == "" or s.title.lower().contains(q) or s.artist.lower().contains(q):
+                push(res, s)
+        return res
+
+    func count(self) -> int:
+        return len(self.songs)
+
+func make_catalog() -> SongCatalog:
+    cat = SongCatalog([])
+    push(cat.songs, Song("s1", "Midnight Compile", "lo.fi.loop", 187,
+        "220:400,0:80,261:400,0:80,196:600,220:400,261:400,329:600,0:120,220:400,196:800",
+        0x7C3AED, 0xDB2777))
+    push(cat.songs, Song("s2", "Pixel Sunrise", "pixel_pavel", 143,
+        "523:220,587:220,659:220,784:300,659:220,587:220,523:440,0:120,440:300,523:500",
+        0xF59E0B, 0xEF4444))
+    push(cat.songs, Song("s3", "Beats to Ship To", "lo.fi.loop", 214,
+        "196:350,220:350,246:350,196:350,233:400,220:400,0:100,174:500,196:700",
+        0x10B981, 0x0EA5E9))
+    push(cat.songs, Song("s4", "Sourdough Shuffle", "arafoods", 176,
+        "293:300,349:300,392:300,440:250,392:250,349:300,293:450,0:120,329:300,293:600",
+        0xD97706, 0x92400E))
+    push(cat.songs, Song("s5", "Fog on the Ridge", "north.trails", 232,
+        "330:400,392:400,440:600,392:400,330:400,294:600,0:150,261:500,294:800",
+        0x334155, 0x64748B))
+    push(cat.songs, Song("s6", "Module Boundaries", "maya.codes", 165,
+        "392:200,440:200,493:200,587:400,493:200,440:200,392:300,0:100,329:300,392:600",
+        0x2563EB, 0x7C3AED))
+    push(cat.songs, Song("s7", "Trailhead", "north.trails", 198,
+        "261:300,329:300,392:300,523:450,440:300,392:300,329:450,294:300,261:700",
+        0x059669, 0x10B981))
+    push(cat.songs, Song("s8", "Release Candidate", "devtools_daily", 154,
+        "440:180,466:180,493:180,523:360,493:180,466:180,440:270,392:180,349:180,440:600",
+        0x6366F1, 0x8B5CF6))
+    return cat
+
+# Play a song preview through the audio backend. Returns false when audio
+# is unavailable (e.g. non-Windows builds) so callers can show a hint.
+func play_preview(cat: SongCatalog, song_id: str) -> bool:
+    s = cat.find(song_id)
+    if s.id == "":
+        return false
+    if not audio.available():
+        return false
+    return audio.play_melody(s.melody)
+
+func stop_preview():
+    audio.stop()

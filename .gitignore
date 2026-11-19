@@ -1,0 +1,9 @@
+*.exe
+*.pdb
+config.ini
+wingram_notes.json
+selftest_config.ini
+still_build.bat
+gen.c
+gen.o
+__pycache__/

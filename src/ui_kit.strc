@@ -1,0 +1,393 @@
+# ui_kit — Wingram widget layer over the gui module (instagram.com styling)
+#
+# Immediate mode: every frame, screens call these helpers with absolute
+# coordinates; helpers draw with the gui backend and read input. Nothing is
+# retained between frames except app state.
+
+use gui
+use math
+use "src/theme.strc"
+use "src/types.strc"
+
+# ------------------------------------------------------------- color mixing
+
+func lerp_color(a: int, b: int, t: float) -> int:
+    ar = (a >> 16) & 255
+    ag = (a >> 8) & 255
+    ab = a & 255
+    br = (b >> 16) & 255
+    bg = (b >> 8) & 255
+    bb = b & 255
+    r = int(float(ar) + (float(br) - float(ar)) * t)
+    g = int(float(ag) + (float(bg) - float(ag)) * t)
+    bl = int(float(ab) + (float(bb) - float(ab)) * t)
+    return r * 65536 + g * 256 + bl
+
+# deterministic pseudo-random from a string seed (for gradient variety)
+func seed_hash(s: str) -> int:
+    h = 5381
+    for i in range(len(s)):
+        h = ((h * 33) + ord(s[i])) % 2147483647
+    return h
+
+func gradient_pair(seed: str) -> (int, int):
+    h = seed_hash(seed)
+    hue = h % 360
+    ca = hsl_to_rgb(hue, 0.62, 0.46)
+    cb = hsl_to_rgb((hue + 42) % 360, 0.62, 0.30)
+    return (ca, cb)
+
+func hsl_to_rgb(h: int, s: float, l: float) -> int:
+    c = (1.0 - abs(2.0 * l - 1.0)) * s
+    hp = float(h % 360) / 60.0
+    hmod = hp - 2.0 * float(int(hp / 2.0))
+    x = c * (1.0 - abs_f(hmod - 1.0))
+    r1 = 0.0
+    g1 = 0.0
+    b1 = 0.0
+    if hp < 1.0:
+        r1 = c
+        g1 = x
+        b1 = 0.0
+    elif hp < 2.0:
+        r1 = x
+        g1 = c
+        b1 = 0.0
+    elif hp < 3.0:
+        r1 = 0.0
+        g1 = c
+        b1 = x
+    elif hp < 4.0:
+        r1 = 0.0
+        g1 = x
+        b1 = c
+    elif hp < 5.0:
+        r1 = x
+        g1 = 0.0
+        b1 = c
+    else:
+        r1 = c
+        g1 = 0.0
+        b1 = x
+    m = l - c / 2.0
+    r = int((r1 + m) * 255.0)
+    g = int((g1 + m) * 255.0)
+    b = int((b1 + m) * 255.0)
+    if r < 0:
+        r = 0
+    if g < 0:
+        g = 0
+    if b < 0:
+        b = 0
+    if r > 255:
+        r = 255
+    if g > 255:
+        g = 255
+    if b > 255:
+        b = 255
+    return r * 65536 + g * 256 + b
+
+func abs_f(v: float) -> float:
+    if v < 0.0:
+        return -v
+    return v
+
+# ------------------------------------------------------------- primitives
+
+func draw_gradient_rect(win: int, x: float, y: float, w: float, h: float, ca: int, cb: int, steps: int):
+    if steps < 2:
+        steps = 2
+    sw = w / float(steps)
+    for i in range(steps):
+        c = lerp_color(ca, cb, float(i) / float(steps - 1))
+        gui.fill_rect(win, x + float(i) * sw, y, sw + 1.0, h, c)
+
+# avatar: filled circle with initials, optional story ring
+func draw_avatar(win: int, t: Theme, u: User, cx: float, cy: float, rad: float, story_ring: bool, seen: bool):
+    if story_ring:
+        ring_col = t.accent
+        if seen:
+            ring_col = t.border
+        gui.stroke_circle(win, cx, cy, rad + 3.0, 2.0, ring_col)
+    pair = gradient_pair(u.avatar_arg)
+    gui.fill_circle(win, cx, cy, rad, pair[0])
+    ini = u.initials()
+    if ini != "":
+        size = rad * 0.9
+        tw = gui.text_width(win, ini, size)
+        gui.text_bold(win, cx - float(tw) / 2.0, cy - size / 2.0 - 2.0, ini, 0xFFFFFF, size)
+
+func draw_username(win: int, t: Theme, u: User, x: float, y: float, size: float = 14.0):
+    gui.text_bold(win, x, y, u.username, t.text, size)
+    if u.verified:
+        vx = x + float(gui.text_width(win, u.username, size)) + 6.0
+        gui.fill_circle(win, vx + 7.0, y + size / 2.0 + 1.0, 7.0, t.accent)
+        # checkmark
+        gui.fill_rect(win, vx + 4.0, y + size / 2.0 + 1.0, 5.0, 2.0, 0xFFFFFF)
+        gui.fill_rect(win, vx + 6.0, y + size / 2.0 + 3.0, 3.0, 2.0, 0xFFFFFF)
+
+# a simple clickable rect; returns true on click this frame
+func click_zone(win: int, x: float, y: float, w: float, h: float) -> bool:
+    mx = float(gui.mouse_x(win))
+    my = float(gui.mouse_y(win))
+    inside = mx >= x and mx <= x + w and my >= y and my <= y + h
+    return inside and gui.mouse_clicked(win)
+
+func hovered(win: int, x: float, y: float, w: float, h: float) -> bool:
+    mx = float(gui.mouse_x(win))
+    my = float(gui.mouse_y(win))
+    return mx >= x and mx <= x + w and my >= y and my <= y + h
+
+# filled button with label; returns true on click
+# (named draw_button to avoid clashing with the legacy gui.UI.button method)
+func draw_button(win: int, t: Theme, x: float, y: float, w: float, h: float, label: str, filled: bool) -> bool:
+    hot = hovered(win, x, y, w, h)
+    col = t.accent
+    if not filled:
+        col = t.accent_soft
+    if hot:
+        if filled:
+            col = lerp_color(t.accent, 0xFFFFFF, 0.12)
+        else:
+            col = lerp_color(t.accent_soft, 0xFFFFFF, 0.08)
+    gui.fill_round(win, x, y, w, h, float(t.radius), col)
+    tw = gui.text_width(win, label, 14)
+    gui.text_bold(win, x + (w - float(tw)) / 2.0, y + (h - 14.0) / 2.0 + 2.0, label, t.text, 14)
+    return hot and gui.mouse_clicked(win)
+
+# single-line text input; returns the current buffer, handles backspace and
+# printable characters from gui.text_input. focus tracks where clicks land.
+func text_input_box(win: int, t: Theme, x: float, y: float, w: float, h: float, buf: str, focused: bool, placeholder: str) -> (str, bool):
+    clicked = click_zone(win, x, y, w, h)
+    if clicked:
+        focused = true
+    col = t.surface2
+    if focused:
+        col = lerp_color(t.surface2, t.accent, 0.10)
+    gui.fill_round(win, x, y, w, h, float(t.radius), col)
+    show = buf
+    if show == "" and not focused:
+        gui.text(win, x + 12.0, y + (h - 14.0) / 2.0 + 2.0, placeholder, t.text_faint, 14)
+    # caret
+    if focused:
+        tw = float(gui.text_width(win, show, 14))
+        blink = (int(clock() * 2.0) % 2) == 0
+        if blink:
+            gui.fill_rect(win, x + 12.0 + tw, y + 10.0, 1.5, h - 20.0, t.text)
+    if focused:
+        for vk in [gui.VK_RETURN]:
+            if gui.key_pressed(win, vk):
+                focused = false
+    gui.clip_push(win, x + 4.0, y, w - 8.0, h)
+    gui.text(win, x + 12.0, y + (h - 14.0) / 2.0 + 2.0, show, t.text, 14)
+    gui.clip_pop(win)
+    return (show, focused)
+
+# consume keyboard text for the focused box (call once per frame, after draw)
+func apply_typed(win: int, buf: str, focused: bool) -> str:
+    if not focused:
+        return buf
+    typed = gui.text_input(win)
+    if typed == "":
+        if gui.key_pressed(win, gui.VK_BACK):
+            if len(buf) > 0:
+                return buf[0:len(buf) - 1]
+        return buf
+    return buf + typed
+
+# ------------------------------------------------------------- icons
+# Minimal vector icons in the instagram.com glyph spirit (line style).
+
+func icon_home(win: int, t: Theme, x: float, y: float, s: float, active: bool):
+    col = t.text
+    if not active:
+        col = t.text_dim
+    lw = 1.8
+    # house: roof + walls
+    gui.fill_rect(win, x + s * 0.08, y + s * 0.48, lw, s * 0.44, col)
+    gui.fill_rect(win, x + s * 0.84, y + s * 0.48, lw, s * 0.44, col)
+    gui.fill_rect(win, x + s * 0.08, y + s * 0.90, s * 0.78, lw, col)
+    # roof
+    steps = 10
+    for i in range(steps):
+        f = float(i) / float(steps - 1)
+        cx = x + s * (0.10 + 0.72 * f)
+        cy = y + s * (0.48 - 0.38 * abs_f(f * 2.0 - 1.0))
+        gui.fill_circle(win, cx, cy, lw * 0.75, col)
+
+func icon_search(win: int, t: Theme, x: float, y: float, s: float, active: bool):
+    col = t.text
+    if not active:
+        col = t.text_dim
+    gui.stroke_circle(win, x + s * 0.42, y + s * 0.42, s * 0.30, 1.8, col)
+    gui.fill_rect(win, x + s * 0.62, y + s * 0.62, s * 0.30, 1.8, col)
+    gui.fill_rect(win, x + s * 0.62, y + s * 0.62, 1.8, s * 0.24, col)
+
+func icon_reels(win: int, t: Theme, x: float, y: float, s: float, active: bool):
+    col = t.text
+    if not active:
+        col = t.text_dim
+    gui.fill_round(win, x + s * 0.08, y + s * 0.08, s * 0.84, s * 0.84, 3.0, col)
+    # play triangle punched in surface color
+    gui.fill_rect(win, x + s * 0.40, y + s * 0.32, s * 0.06, s * 0.36, t.bg)
+    gui.fill_rect(win, x + s * 0.40, y + s * 0.32, s * 0.28, s * 0.06, t.bg)
+    gui.fill_rect(win, x + s * 0.62, y + s * 0.50, s * 0.06, s * 0.18, t.bg)
+
+func icon_message(win: int, t: Theme, x: float, y: float, s: float, active: bool):
+    col = t.text
+    if not active:
+        col = t.text_dim
+    gui.stroke_circle(win, x + s * 0.5, y + s * 0.5, s * 0.40, 1.8, col)
+    # tail
+    gui.fill_rect(win, x + s * 0.22, y + s * 0.72, s * 0.16, 1.8, col)
+    gui.fill_rect(win, x + s * 0.22, y + s * 0.62, 1.8, s * 0.12, col)
+
+func icon_heart(win: int, t: Theme, x: float, y: float, s: float, col: int):
+    gui.fill_circle(win, x + s * 0.28, y + s * 0.32, s * 0.24, col)
+    gui.fill_circle(win, x + s * 0.72, y + s * 0.32, s * 0.24, col)
+    gui.fill_rect(win, x + s * 0.08, y + s * 0.30, s * 0.84, s * 0.30, col)
+    gui.fill_circle(win, x + s * 0.5, y + s * 0.62, s * 0.22, col)
+    gui.fill_circle(win, x + s * 0.30, y + s * 0.58, s * 0.18, col)
+    gui.fill_circle(win, x + s * 0.70, y + s * 0.58, s * 0.18, col)
+
+func icon_comment(win: int, t: Theme, x: float, y: float, s: float, col: int):
+    gui.stroke_circle(win, x + s * 0.5, y + s * 0.5, s * 0.38, 1.8, col)
+    gui.fill_rect(win, x + s * 0.24, y + s * 0.74, s * 0.18, 1.8, col)
+    gui.fill_rect(win, x + s * 0.24, y + s * 0.62, 1.8, s * 0.14, col)
+
+func icon_send(win: int, t: Theme, x: float, y: float, s: float, col: int):
+    steps = 12
+    for i in range(steps):
+        f = float(i) / float(steps - 1)
+        cx = x + s * (0.12 + 0.72 * f)
+        cy = y + s * 0.5 - s * 0.18 * (1.0 - abs_f(f * 2.0 - 1.0))
+        gui.fill_circle(win, cx, cy, 1.6, col)
+    gui.fill_rect(win, x + s * 0.10, y + s * 0.38, s * 0.70, 1.6, col)
+
+func icon_bookmark(win: int, t: Theme, x: float, y: float, s: float, filled: bool, col: int):
+    lw = 1.8
+    if not filled:
+        gui.fill_rect(win, x + s * 0.22, y + s * 0.12, lw, s * 0.76, col)
+        gui.fill_rect(win, x + s * 0.76, y + s * 0.12, lw, s * 0.76, col)
+        gui.fill_rect(win, x + s * 0.22, y + s * 0.10, s * 0.55, lw, col)
+        gui.fill_rect(win, x + s * 0.22, y + s * 0.86, s * 0.55, lw, col)
+        gui.fill_rect(win, x + s * 0.22, y + s * 0.55, lw, s * 0.32, col)
+        gui.fill_rect(win, x + s * 0.76, y + s * 0.55, lw, s * 0.32, col)
+        gui.fill_rect(win, x + s * 0.30, y + s * 0.62, s * 0.18, lw, col)
+        gui.fill_rect(win, x + s * 0.52, y + s * 0.62, s * 0.18, lw, col)
+    else:
+        gui.fill_rect(win, x + s * 0.22, y + s * 0.12, s * 0.56, s * 0.76, col)
+        gui.fill_rect(win, x + s * 0.30, y + s * 0.62, s * 0.18, s * 0.26, t.bg)
+        gui.fill_rect(win, x + s * 0.52, y + s * 0.62, s * 0.18, s * 0.26, t.bg)
+
+func icon_music(win: int, t: Theme, x: float, y: float, s: float, col: int):
+    gui.fill_rect(win, x + s * 0.30, y + s * 0.10, 1.8, s * 0.62, col)
+    gui.fill_circle(win, x + s * 0.26, y + s * 0.72, s * 0.10, col)
+    gui.fill_circle(win, x + s * 0.56, y + s * 0.64, s * 0.08, col)
+    gui.fill_rect(win, x + s * 0.30, y + s * 0.10, s * 0.28, 1.8, col)
+    gui.fill_rect(win, x + s * 0.56, y + s * 0.36, 1.8, s * 0.28, col)
+
+func icon_plus(win: int, t: Theme, x: float, y: float, s: float, col: int):
+    gui.fill_rect(win, x + s * 0.10, y + s * 0.46, s * 0.80, 2.0, col)
+    gui.fill_rect(win, x + s * 0.46, y + s * 0.10, 2.0, s * 0.80, col)
+
+func icon_settings(win: int, t: Theme, x: float, y: float, s: float, col: int):
+    gui.stroke_circle(win, x + s * 0.5, y + s * 0.5, s * 0.20, 1.8, col)
+    gui.stroke_circle(win, x + s * 0.5, y + s * 0.5, s * 0.36, 1.8, col)
+    for i in range(6):
+        ang = float(i) * 60.0 * 3.14159265 / 180.0
+        cx = x + s * 0.5 + cos(ang) * s * 0.36
+        cy = y + s * 0.5 + sin(ang) * s * 0.36
+        gui.fill_circle(win, cx, cy, 2.0, col)
+
+func icon_bell(win: int, t: Theme, x: float, y: float, s: float, col: int):
+    gui.fill_circle(win, x + s * 0.5, y + s * 0.30, s * 0.26, col)
+    gui.fill_rect(win, x + s * 0.24, y + s * 0.28, s * 0.52, s * 0.30, col)
+    gui.fill_rect(win, x + s * 0.18, y + s * 0.58, s * 0.64, 2.0, col)
+    gui.fill_circle(win, x + s * 0.5, y + s * 0.78, s * 0.07, col)
+
+# ------------------------------------------------------------- the nav rail
+# The instagram.com web left rail. Returns the screen to switch to ("" = stay).
+
+NAV_ITEMS = ["home", "search", "explore", "reels", "messages", "notifications", "create", "profile", "settings"]
+
+func draw_nav_rail(win: int, t: Theme, x: float, y: float, w: float, h: float, current: str, me: User, unread_dms: int, unread_notifs: int) -> str:
+    gui.fill_rect(win, x, y, 1.0, h, t.border)
+    item_h = 44.0
+    iy = y + 18.0
+    # logo
+    gui.text_bold(win, x + 22.0, iy + 2.0, "Wingram", t.text, 22)
+    iy = iy + 52.0
+    result = ""
+    i = 0
+    for item in NAV_ITEMS:
+        active = item == current or (item == "profile" and current == "profile")
+        yy = iy + float(i) * item_h
+        if hovered(win, x + 8.0, yy, w - 16.0, item_h):
+            gui.fill_round(win, x + 8.0, yy + 2.0, w - 16.0, item_h - 6.0, 8.0, t.surface2)
+        # icon + label
+        ix = x + 22.0
+        s = 22.0
+        icon_col = t.text_dim
+        if active:
+            icon_col = t.text
+        if item == "home":
+            icon_home(win, t, ix, yy + 8.0, s, active)
+        elif item == "search":
+            icon_search(win, t, ix, yy + 8.0, s, active)
+        elif item == "explore":
+            icon_search(win, t, ix, yy + 8.0, s, active)
+        elif item == "reels":
+            icon_reels(win, t, ix, yy + 8.0, s, active)
+        elif item == "messages":
+            icon_message(win, t, ix, yy + 8.0, s, active)
+        elif item == "notifications":
+            icon_bell(win, t, ix, yy + 8.0, s, icon_col)
+        elif item == "create":
+            icon_plus(win, t, ix, yy + 8.0, s, t.text)
+        elif item == "profile":
+            draw_avatar(win, t, me, ix + 11.0, yy + 19.0, 11.0, false, false)
+        elif item == "settings":
+            icon_settings(win, t, ix, yy + 8.0, s, icon_col)
+        label = nav_label(item)
+        col = t.text
+        if not active:
+            col = t.text_dim
+        gui.text_bold(win, x + 58.0, yy + 12.0, label, col, 15)
+        # badges
+        if item == "messages" and unread_dms > 0:
+            draw_badge(win, t, x + 42.0, yy + 8.0, "{unread_dms}")
+        if item == "notifications" and unread_notifs > 0:
+            draw_badge(win, t, x + 42.0, yy + 8.0, "{unread_notifs}")
+        if click_zone(win, x + 8.0, yy, w - 16.0, item_h):
+            result = item
+        i = i + 1
+    # footer
+    gui.text(win, x + 22.0, y + h - 26.0, "still 0.6.1 • wingram 0.1", t.text_faint, 11)
+    return result
+
+func nav_label(item: str) -> str:
+    if item == "home":
+        return "Home"
+    if item == "search":
+        return "Search"
+    if item == "explore":
+        return "Explore"
+    if item == "reels":
+        return "Reels"
+    if item == "messages":
+        return "Messages"
+    if item == "notifications":
+        return "Notifications"
+    if item == "create":
+        return "Create"
+    if item == "profile":
+        return "Profile"
+    if item == "settings":
+        return "Settings"
+    return item
+
+func draw_badge(win: int, t: Theme, x: float, y: float, label: str):
+    w = float(gui.text_width(win, label, 11)) + 12.0
+    gui.fill_round(win, x, y, w, 16.0, 8.0, t.badge)
+    gui.text_bold(win, x + 6.0, y + 2.0, label, 0xFFFFFF, 11)

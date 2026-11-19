@@ -1,0 +1,119 @@
+# app — the Wingram application state shared by all screens
+#
+# Screens are pure functions of App: they draw the current frame from state
+# and return the (possibly updated) App. Lists and dicts inside App are
+# refcounted, so the struct shell copy is cheap and element edits persist.
+# Struct defaults must be constants in Still, so make_app() wires everything.
+
+use "src/theme.strc"
+use "src/types.strc": User, Post, StoryItem, NoteItem, Reel, Chat, ChatMsg, Notif
+use "src/songs.strc": Song, SongCatalog
+use "src/adapters.strc": Adapter
+use "src/mods_engine.strc": ModEngine
+
+type App:
+    win: int
+    screen: str
+    running: bool
+    theme: Theme
+    adapter: Adapter
+    catalog: SongCatalog
+    mods: ModEngine
+    me: User
+    users: [User]
+    posts: [Post]
+    stories: [StoryItem]
+    notes: [NoteItem]
+    reels: [Reel]
+    chats: [Chat]
+    notifs: [Notif]
+    scroll: {str: int}
+    search_query: str
+    search_focus: bool
+    compose_text: str
+    compose_focus: bool
+    compose_song: str
+    song_query: str
+    song_query_focus: bool
+    picker_open: bool
+    preview_song: str
+    preview_playing: bool
+    story_index: int
+    story_open: bool
+    chat_index: int
+    dm_text: str
+    dm_focus: bool
+    profile_user: str
+    status_line: str
+    toast: str
+    toast_until: float
+    settings_cfg: {str: str}
+    settings_focus: str
+    ig_target: str
+    reload_requested: bool
+    img_cache: {str: int}
+    story_started: float
+
+    func scroll_of(self, key: str) -> int:
+        v = self.scroll.get(key, 0)
+        return v
+
+    func set_scroll(self, key: str, v: int):
+        self.scroll[key] = v
+
+    func unread_dms(self) -> int:
+        n = 0
+        for c in self.chats:
+            n = n + c.unread
+        return n
+
+    func toast_for(self, msg: str, secs: float):
+        self.toast = msg
+        self.toast_until = clock() + secs
+
+func make_app(win: int) -> App:
+    users = demo_users()
+    me = demo_self()
+    app = App(
+        win,
+        "feed",
+        true,
+        make_theme(),
+        make_adapter("local"),
+        make_catalog(),
+        ModEngine([], "mods"),
+        me,
+        users,
+        demo_posts(users),
+        demo_stories(users, me),
+        demo_notes(users),
+        demo_reels(users),
+        demo_chats(users),
+        demo_notifications(users),
+        {},
+        "",
+        false,
+        "",
+        false,
+        "",
+        "",
+        false,
+        false,
+        "",
+        false,
+        0,
+        false,
+        0,
+        "",
+        false,
+        "",
+        "ready",
+        "",
+        0.0,
+        {},
+        "",
+        "instagram",
+        false,
+        {},
+        0.0)
+    return app

@@ -1,0 +1,199 @@
+# screen_notes — the note composer with the song picker (the flagship feature)
+#
+# Mirrors the mobile flow: type a short note (max 60 chars like mobile), tap
+# the music sticker to open the song picker, pick a song (searchable list
+# with artist/album), optionally audition it with a synthesized preview, then
+# post. Notes appear on the feed's notes tray and persist to
+# wingram_notes.json so they survive restarts.
+
+use gui
+use "src/theme.strc"
+use "src/types.strc": User, NoteItem
+use "src/songs.strc": Song
+use "src/ui_kit.strc"
+use "src/app.strc"
+use "src/adapters.strc"
+use "src/storage.strc": NOTES_FILE
+
+MAX_NOTE_CHARS = 60
+
+func render(app: App) -> App:
+    win = app.win
+    t = app.theme
+    x0 = 24.0
+    y = 20.0
+    gui.text_bold(win, x0, y, "New note", t.text, 24)
+    gui.text(win, x0 + 130.0, y + 8.0, "notes live for 24 hours", t.text_faint, 12)
+    y = y + 56.0
+    # the bubble preview: draw what the note will look like on the tray
+    bubble_w = 150.0
+    if app.compose_song != "":
+        s = app.catalog.find(app.compose_song)
+        gui.fill_round(win, x0, y, bubble_w + 60.0, 40.0, 20.0, t.note_self)
+        icon_music(win, t, x0 + 12.0, y + 11.0, 16.0, t.sticker_b)
+        gui.text_bold(win, x0 + 34.0, y + 11.0, s.title, t.text, 13)
+    else:
+        gui.fill_round(win, x0, y, bubble_w, 40.0, 20.0, t.note_self)
+        preview = app.compose_text
+        if preview == "":
+            preview = "your note here"
+        gui.clip_push(win, x0 + 4.0, y, bubble_w - 8.0, 40.0)
+        gui.text(win, x0 + 12.0, y + 11.0, preview, t.text, 13)
+        gui.clip_pop(win)
+    draw_avatar(win, t, app.me, x0 + bubble_w / 2.0 + (30.0 if app.compose_song != "" else 0.0), y + 66.0, 22.0, false, false)
+    y = y + 110.0
+    # text input
+    gui.text(win, x0, y - 22.0, "note text", t.text_dim, 12)
+    buf, f = text_input_box(win, t, x0, y, 420.0, 44.0, app.compose_text, app.compose_focus, "what's happening?")
+    if f and not app.compose_focus:
+        app.compose_focus = true
+    if not f and app.compose_focus and gui.mouse_clicked(win):
+        app.compose_focus = false
+    app.compose_text = apply_typed(win, buf, app.compose_focus)
+    # char counter (mobile allows 60)
+    left = MAX_NOTE_CHARS - len(app.compose_text)
+    col = t.text_dim
+    if left < 10:
+        col = t.like
+    gui.text(win, x0 + 430.0, y + 14.0, "{left}", col, 14)
+    y = y + 62.0
+    # song row
+    gui.text(win, x0, y - 22.0, "add a song", t.text_dim, 12)
+    if app.compose_song != "":
+        s = app.catalog.find(app.compose_song)
+        gui.fill_round(win, x0, y, 250.0, 40.0, 20.0, lerp_color(s.cover_a, s.cover_b, 0.5))
+        icon_music(win, t, x0 + 12.0, y + 11.0, 16.0, 0xFFFFFF)
+        gui.text_bold(win, x0 + 36.0, y + 12.0, "{s.title} — {s.artist}", 0xFFFFFF, 13)
+        # play/stop preview
+        px = x0 + 260.0
+        label = "play"
+        if app.preview_song == app.compose_song and app.preview_playing:
+            label = "stop"
+        if draw_button(win, t, px, y, 80.0, 40.0, label, false):
+            if label == "play":
+                if play_preview(app.catalog, app.compose_song):
+                    app.preview_song = app.compose_song
+                    app.preview_playing = true
+                else:
+                    app.toast_for("audio backend unavailable (needs Windows)", 2.5)
+            else:
+                stop_preview()
+                app.preview_playing = false
+                app.preview_song = ""
+        # remove song
+        if draw_button(win, t, px + 90.0, y, 80.0, 40.0, "remove", false):
+            app.compose_song = ""
+            if app.preview_song == s.id:
+                stop_preview()
+                app.preview_playing = false
+                app.preview_song = ""
+    else:
+        if draw_button(win, t, x0, y, 180.0, 40.0, "pick a song", true):
+            app.picker_open = true
+            app.song_query = ""
+            app.song_query_focus = false
+        gui.text(win, x0 + 196.0, y + 13.0, "like the mobile music sticker", t.text_faint, 12)
+    y = y + 62.0
+    # actions
+    if draw_button(win, t, x0, y, 140.0, 44.0, "post note", true):
+        app = post_note(app)
+    if draw_button(win, t, x0 + 156.0, y, 120.0, 44.0, "cancel", false):
+        app.screen = "feed"
+        stop_preview()
+        app.preview_playing = false
+        app.preview_song = ""
+    # song picker overlay
+    if app.picker_open:
+        app = render_song_picker(app)
+    return app
+
+func post_note(app: App) -> App:
+    text = app.compose_text.trim()
+    if text == "" and app.compose_song == "":
+        app.toast_for("write something or pick a song first", 2.0)
+        return app
+    if len(text) > MAX_NOTE_CHARS:
+        text = text[0:MAX_NOTE_CHARS]
+    nid = "me{int(clock() * 1000.0)}"
+    n = NoteItem(nid, app.me, text, app.compose_song, "24h")
+    # newest note first (the tray reads left to right like mobile)
+    arr = [n]
+    for i in range(len(app.notes)):
+        push(arr, app.notes[i])
+    app.notes = arr
+    save_my_notes(NOTES_FILE, app.notes)
+    stop_preview()
+    app.preview_playing = false
+    app.preview_song = ""
+    app.compose_text = ""
+    app.compose_song = ""
+    app.compose_focus = false
+    app.picker_open = false
+    app.screen = "feed"
+    app.toast_for("note posted — it's on your feed tray", 2.5)
+    return app
+
+# the song picker: searchable catalog list with play buttons
+PICKER_W = 480
+PICKER_H = 400
+
+func render_song_picker(app: App) -> App:
+    win = app.win
+    t = app.theme
+    px = 80.0
+    py = 60.0
+    # dim backdrop
+    gui.fill_rect(win, 0.0, 0.0, float(gui.width(win)), float(gui.height(win)), lerp_color(0x000000, t.bg, 0.65))
+    gui.fill_round(win, px, py, float(PICKER_W), float(PICKER_H), 12.0, t.surface)
+    gui.text_bold(win, px + 20.0, py + 18.0, "Choose a song", t.text, 18)
+    if draw_button(win, t, px + float(PICKER_W) - 90.0, py + 14.0, 70.0, 32.0, "close", false):
+        app.picker_open = false
+        return app
+    # search box
+    q, f = text_input_box(win, t, px + 20.0, py + 56.0, float(PICKER_W) - 40.0, 38.0, app.song_query, app.song_query_focus, "search songs and artists")
+    app.song_query_focus = f
+    app.song_query = apply_typed(win, q, app.song_query_focus)
+    # list
+    results = app.catalog.search(app.song_query)
+    ly = py + 108.0
+    row_h = 44.0
+    for i in range(len(results)):
+        if ly + row_h > py + float(PICKER_H) - 16.0:
+            break
+        s = results[i]
+        rowy = ly + float(i) * row_h
+        hot = hovered(win, px + 12.0, rowy, float(PICKER_W) - 24.0, row_h)
+        if hot:
+            gui.fill_round(win, px + 12.0, rowy, float(PICKER_W) - 24.0, row_h - 4.0, 8.0, t.surface2)
+        # cover chip
+        gui.fill_round(win, px + 20.0, rowy + 6.0, 32.0, 32.0, 8.0, lerp_color(s.cover_a, s.cover_b, 0.5))
+        icon_music(win, t, px + 28.0, rowy + 14.0, 16.0, 0xFFFFFF)
+        gui.text_bold(win, px + 64.0, rowy + 6.0, s.title, t.text, 14)
+        gui.text(win, px + 64.0, rowy + 24.0, "{s.artist} • {s.duration_s}s", t.text_dim, 12)
+        # preview button
+        playing = app.preview_song == s.id and app.preview_playing
+        plabel = "stop"
+        if not playing:
+            plabel = "play"
+        if draw_button(win, t, px + float(PICKER_W) - 190.0, rowy + 4.0, 64.0, 30.0, plabel, playing):
+            if playing:
+                stop_preview()
+                app.preview_playing = false
+                app.preview_song = ""
+            else:
+                if play_preview(app.catalog, s.id):
+                    app.preview_song = s.id
+                    app.preview_playing = true
+                else:
+                    app.toast_for("audio backend unavailable (needs Windows)", 2.5)
+        # pick button
+        if draw_button(win, t, px + float(PICKER_W) - 118.0, rowy + 4.0, 64.0, 30.0, "pick", true):
+            app.compose_song = s.id
+            app.picker_open = false
+            stop_preview()
+            app.preview_playing = false
+            app.preview_song = ""
+            app.toast_for("attached {s.title}", 2.0)
+    if len(results) == 0:
+        gui.text(win, px + 20.0, ly + 10.0, "no songs match", t.text_faint, 13)
+    return app

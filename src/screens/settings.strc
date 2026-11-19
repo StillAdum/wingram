@@ -1,0 +1,173 @@
+# screen_settings — settings incl. the Mods section
+#
+# Sections: Account (backend selection: local demo / fediverse / instagram
+# experimental), Appearance (theme info), Mods (list .strc mods with enable
+# toggles + reload), About. Changes persist to config.ini; mods hot-reload.
+
+use gui
+use "src/theme.strc"
+use "src/ui_kit.strc"
+use "src/app.strc"
+use "src/adapters.strc"
+use "src/mods_engine.strc"
+use "src/storage.strc"
+
+func render(app: App) -> App:
+    win = app.win
+    t = app.theme
+    x0 = 24.0
+    y = 20.0
+    gui.text_bold(win, x0, y, "Settings", t.text, 24)
+    y = y + 52.0
+    app = render_account_section(app, x0, y)
+    y = y + 170.0
+    app = render_mods_section(app, x0, y)
+    y = y + float(len(app.mods.mods)) * 64.0 + 120.0
+    render_about_section(app, x0, y)
+    return app
+
+# ------------------------------------------------------------- account
+
+func render_account_section(app: App, x: float, y: float) -> App:
+    win = app.win
+    t = app.theme
+    w = 560.0
+    gui.fill_round(win, x, y, w, 150.0, 10.0, t.surface)
+    gui.text_bold(win, x + 16.0, y + 14.0, "Account", t.text, 16)
+    bx = x + 16.0
+    by = y + 46.0
+    gui.text(win, bx, by + 4.0, "backend:", t.text_dim, 13)
+    labels = ["local demo", "fediverse", "instagram (experimental)"]
+    modes = ["local", "fediverse", "instagram"]
+    for i in range(3):
+        active = app.adapter.mode == modes[i]
+        col = t.surface2
+        if active:
+            col = t.accent
+        gui.fill_round(win, bx + 90.0 + float(i) * 150.0, by, 140.0, 30.0, 8.0, col)
+        gui.text_bold(win, bx + 100.0 + float(i) * 150.0, by + 8.0, labels[i], 0xFFFFFF if active else t.text_dim, 12)
+        if click_zone(win, bx + 90.0 + float(i) * 150.0, by, 140.0, 30.0):
+            if app.adapter.mode != modes[i]:
+                app.adapter.mode = modes[i]
+                app.adapter.status = ""
+                app.reload_requested = true
+                if modes[i] == "instagram":
+                    app.toast_for("experimental: use an account you can risk (ToS)", 3.5)
+    # status line
+    gui.text(win, bx, by + 44.0, "status: {app.adapter.status}", t.text_dim, 12)
+    # instance + instagram username fields
+    gui.text(win, bx, by + 64.0, "instance:", t.text_dim, 13)
+    inst = app.settings_cfg.get("account.fediverse_instance", app.adapter.instance)
+    buf, f = text_input_box(win, t, bx + 90.0, by + 58.0, 200.0, 30.0, inst, app.settings_focus == "instance", "mastodon.world")
+    if app.settings_focus == "instance":
+        app.settings_cfg["account.fediverse_instance"] = apply_typed(win, buf, true)
+        app.adapter.instance = app.settings_cfg["account.fediverse_instance"]
+    elif f:
+        app.settings_focus = "instance"
+    if draw_button(win, t, bx + 300.0, by + 56.0, 90.0, 32.0, "reload", false):
+        app.reload_requested = true
+    gui.text(win, bx, by + 96.0, "ig username:", t.text_dim, 13)
+    tgt = app.ig_target
+    buf2, f2 = text_input_box(win, t, bx + 90.0, by + 90.0, 200.0, 30.0, tgt, app.settings_focus == "ig_target", "username")
+    if app.settings_focus == "ig_target":
+        app.ig_target = apply_typed(win, buf2, true)
+    elif f2:
+        app.settings_focus = "ig_target"
+    gui.text(win, bx + 300.0, by + 100.0, "sessionid: {mask_session(app.adapter.ig_sessionid)}", t.text_dim, 12)
+    return app
+
+func mask_session(s: str) -> str:
+    if s == "":
+        return "(not set)"
+    if len(s) <= 8:
+        return "****"
+    return "{s[0:4]}...{s[len(s) - 4:]}"
+
+# ------------------------------------------------------------- mods
+
+func render_mods_section(app: App, x: float, y: float) -> App:
+    win = app.win
+    t = app.theme
+    w = 560.0
+    header_h = 56.0
+    rows = len(app.mods.mods)
+    box_h = float(rows) * 64.0 + header_h + 12.0
+    if box_h < 120.0:
+        box_h = 120.0
+    gui.fill_round(win, x, y, w, box_h, 10.0, t.surface)
+    gui.text_bold(win, x + 16.0, y + 14.0, "Mods", t.text, 16)
+    gui.text(win, x + 80.0, y + 18.0, "drop <modname>.strc files into the mods/ folder", t.text_faint, 12)
+    n_enabled = app.mods.enabled_count()
+    gui.text(win, x + 16.0, y + 36.0, "{n_enabled} of {rows} enabled", t.text_dim, 12)
+    if draw_button(win, t, x + w - 106.0, y + 12.0, 90.0, 32.0, "reload mods", false):
+        app.mods.scan()
+        app.mods = apply_config(app.mods, app.settings_cfg)
+        app.theme = app.mods.apply_theme(make_theme())
+        save_config("config.ini", app.mods, app.settings_cfg)
+        app.toast_for("mods reloaded", 2.0)
+    ry = y + header_h
+    for i in range(rows):
+        m = app.mods.mods[i]
+        rowy = ry + float(i) * 64.0
+        if m.enabled:
+            gui.fill_round(win, x + 10.0, rowy, w - 20.0, 58.0, 8.0, t.accent_soft)
+        # toggle
+        toggled = draw_toggle(win, t, x + 22.0, rowy + 14.0, m.enabled)
+        if toggled != m.enabled:
+            app.mods.set_enabled(m.id, toggled)
+            app.theme = app.mods.apply_theme(make_theme())
+            save_config("config.ini", app.mods, app.settings_cfg)
+            if toggled:
+                app.toast_for("mod on: {m.name}", 2.0)
+            else:
+                app.toast_for("mod off: {m.name}", 2.0)
+        # name + summary
+        gui.text_bold(win, x + 70.0, rowy + 8.0, m.name, t.text, 14)
+        gui.text(win, x + 70.0, rowy + 28.0, m.summary(), t.text_dim, 12)
+        if m.description != "":
+            gui.clip_push(win, x + 70.0, rowy + 44.0, w - 180.0, 14.0)
+            gui.text(win, x + 70.0, rowy + 44.0, m.description, t.text_faint, 11)
+            gui.clip_pop(win)
+        # source file chip
+        fname = m.file
+        if fname.contains("/"):
+            fname = fname[find_last_slash(fname) + 1:]
+        gui.text(win, x + w - 130.0, rowy + 20.0, fname, t.text_faint, 11)
+    if rows == 0:
+        gui.text(win, x + 16.0, ry + 16.0, "no mods found — create mods/sample.strc and reload", t.text_dim, 13)
+    return app
+
+func find_last_slash(s: str) -> int:
+    idx = -1
+    for i in range(len(s)):
+        if s[i] == "/":
+            idx = i
+    return idx
+
+# a switch widget; returns the NEW state (click flips it)
+func draw_toggle(win: int, t: Theme, x: float, y: float, on: bool) -> bool:
+    w = 44.0
+    h = 22.0
+    col = t.surface2
+    knob_x = x + 2.0
+    if on:
+        col = t.accent
+        knob_x = x + w - 20.0
+    gui.fill_round(win, x, y, w, h, float(h / 2.0), col)
+    gui.fill_circle(win, knob_x + 9.0, y + float(h) / 2.0, 9.0, t.text)
+    clicked = click_zone(win, x - 2.0, y - 2.0, w + 4.0, h + 4.0)
+    if clicked:
+        return not on
+    return on
+
+# ------------------------------------------------------------- about
+
+func render_about_section(app: App, x: float, y: float):
+    win = app.win
+    t = app.theme
+    w = 560.0
+    gui.fill_round(win, x, y, w, 92.0, 10.0, t.surface)
+    gui.text_bold(win, x + 16.0, y + 14.0, "About", t.text, 16)
+    gui.text(win, x + 16.0, y + 40.0, "Wingram 0.1.0 — a PC Instagram-style client written entirely in Still", t.text_dim, 12)
+    gui.text(win, x + 16.0, y + 58.0, "requires the Still 0.6.1 runtime libraries (net/gui/audio/media)", t.text_dim, 12)
+    gui.text(win, x + 16.0, y + 76.0, "github.com/StillAdum/wingram", t.accent, 12)
