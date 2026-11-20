@@ -1,28 +1,25 @@
-# adapters — data backends: local demo, fediverse (real), instagram (experimental)
+# adapters — the data layer: REAL Instagram (web API + sessionid) and the
+# fediverse public timeline as an optional extra backend.
 #
-# Every adapter fills the same types.strc models, so screens are
-# backend-agnostic. Selection lives in Settings -> Account.
-#
-# * local      — bundled demo dataset (offline, always works)
-# * fediverse  — LIVE public timelines from open Mastodon/Pixelfed instances
-#                via the documented /api/v1/timelines/public endpoint. No
-#                login needed on instances that allow public access; an
-#                access token can be pasted for instances that require one.
-# * instagram  — EXPERIMENTAL, opt-in. Talks to Instagram's private mobile
-#                API (i.instagram.com/api/v1) the same way instagrapi does:
-#                you paste the sessionid cookie from a logged-in browser and
-#                the client presents it on every request. Instagram does not
-#                offer an official API for third-party clients anymore (the
-#                Basic Display API shut down in Dec 2024), so this mode:
-#                  - violates Instagram's Terms of Service,
-#                  - can get your account rate-limited or banned,
-#                  - may break without notice when Instagram changes.
-#                Read-mostly by design (profile, posts, stories tray). Use
-#                at your own risk with an account you can afford to lose.
+# Instagram mode (default, the "actual functioning app" path):
+#   The webview login (screens/login.strc) captures the browser session
+#   cookies (sessionid + ds_user_id + csrftoken). Every request after that
+#   talks to instagram.com's own web API — the same endpoints the
+#   instagram.com web app calls from your browser — with the session cookie
+#   plus the X-IG-App-ID web key:
+#     /api/v1/users/{id}/info/          your profile
+#     /api/v1/feed/timeline/            the home feed (falls back to
+#     /api/v1/feed/user/{id}/           your posts when the timeline refuses)
+#     /api/v1/users/web_profile_info/   any profile
+#     /api/v1/web/search/topsearch/     user search
+#     /api/v1/news/inbox/               notifications (best effort)
+#   Instagram has no official third-party API, so like every other
+#   sessionid-based client this mode is unofficial: read-mostly, and heavy
+#   automated use can get an account rate-limited.
 
 use net
 use json
-use "src/types.strc": User, Post
+use "src/types.strc": User, Post, Notif, time_label_from_unix, session_user_id, find_sub, count_format
 use "src/storage.strc": strip_html
 use "src/theme.strc"
 
@@ -35,42 +32,349 @@ type ProfileResult:
     ok: bool
     user: User
     posts: [Post]
+    error: str
 
 type FeedResult:
     ok: bool
     users: [User]
     posts: [Post]
+    more: bool
+    next_max_id: str
+    error: str
+
+type SearchResults:
+    ok: bool
+    users: [User]
+    error: str
+
+type NotifResult:
+    ok: bool
+    notifs: [Notif]
+    error: str
 
 type Adapter:
-    mode: str                       # "local" | "fediverse" | "instagram"
+    mode: str = "instagram"         # "instagram" | "fediverse"
     instance: str = "mastodon.world"
     token: str = ""                 # fediverse access token (optional)
-    ig_sessionid: str = ""          # instagram sessionid cookie (experimental)
-    ig_ds_user_id: str = ""         # derived from sessionid digits
-    status: str = ""                # last status line for the UI
+    ig_sessionid: str = ""          # instagram session cookie
+    ig_ds_user_id: str = ""         # your numeric user id
+    ig_csrftoken: str = ""          # web csrf token (from cookies)
+    status: str = ""
     last_error: str = ""
 
 func make_adapter(mode: str) -> Adapter:
     return Adapter(mode)
 
-# --------------------------------------------------------------- local demo
+# ---------------------------------------------------------------- instagram
 
-func load_local(users_in: [User]) -> ([User], [Post], [NoteItem], [Reel]):
-    users = demo_users()
-    posts = demo_posts(users)
-    notes = demo_notes(users)
-    reels = demo_reels(users)
-    return (users, posts, notes, reels)
+IG_APP_ID = "936619743392459"
+IG_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
-# ---------------------------------------------------------------- fediverse
-# Open instances known to allow (or likely to allow) anonymous public
-# timeline reads. The first one that answers wins; a user-provided instance
-# and token take priority.
+func ig_headers(a: Adapter) -> str:
+    h = "User-Agent: {IG_UA}\nX-IG-App-ID: {IG_APP_ID}\nX-Requested-With: XMLHttpRequest\nAccept: application/json\nReferer: https://www.instagram.com/"
+    cookie = ""
+    if a.ig_sessionid != "":
+        cookie = "sessionid={a.ig_sessionid}"
+    if a.ig_ds_user_id != "":
+        if cookie != "":
+            cookie = cookie + "; "
+        cookie = cookie + "ds_user_id={a.ig_ds_user_id}"
+    if a.ig_csrftoken != "":
+        if cookie != "":
+            cookie = cookie + "; "
+        cookie = cookie + "csrftoken={a.ig_csrftoken}"
+        h = h + "\nX-CSRFToken: {a.ig_csrftoken}"
+    if cookie != "":
+        h = h + "\nCookie: {cookie}"
+    return h
+
+# plain browser UA for public CDN image URLs (they are pre-signed)
+func ig_image_headers() -> str:
+    return "User-Agent: {IG_UA}\nAccept: image/*,*/*;q=0.8\nReferer: https://www.instagram.com/"
+
+func ig_get(a: Adapter, path: str) -> FetchResult:
+    if a.ig_sessionid == "" or a.ig_ds_user_id == "":
+        a.last_error = "not logged in"
+        return FetchResult(false, none, a.last_error)
+    r = net.get("https://www.instagram.com{path}", ig_headers(a), 20000)
+    if not r.ok:
+        a.last_error = r.error
+        a.status = "network error"
+        return FetchResult(false, none, a.last_error)
+    if r.status == 401 or r.status == 403:
+        a.last_error = "session rejected ({r.status}) — log in again from Settings"
+        a.status = "session expired"
+        return FetchResult(false, none, a.last_error)
+    if r.status != 200:
+        a.last_error = "instagram returned {r.status}"
+        a.status = "http {r.status}"
+        return FetchResult(false, none, a.last_error)
+    res = json.parse(r.body)
+    if not res.ok:
+        a.last_error = "instagram sent invalid JSON"
+        a.status = "bad json"
+        return FetchResult(false, none, a.last_error)
+    a.status = "live from instagram"
+    a.last_error = ""
+    return FetchResult(true, res.value, "")
+
+# map one v1 media object to a Post (registers the user in `users`)
+func ig_map_media(users: [User], media: any, fallback_id: str) -> Post:
+    mid = json.get_str(media, "pk", "")
+    if mid == "":
+        mid = json.get_str(media, "id", fallback_id)
+    mu = json.get_dict(media, "user")
+    username = json.get_str(mu, "username", "unknown")
+    uid = "ig:{username}"
+    u = find_or_make_user(users, uid, username,
+        json.get_str(mu, "full_name", username), "")
+    u.avatar_url = json.get_str(mu, "profile_pic_url", "")
+    if u.avatar_url != "":
+        u.avatar_kind = "url"
+    for uu in users:
+        if uu.id == uid:
+            uu.avatar_url = u.avatar_url
+            if u.avatar_url != "":
+                uu.avatar_kind = "url"
+            break
+    # caption: usually an object, sometimes a list of objects
+    cap_text = ""
+    cap = json.get_dict(media, "caption")
+    if cap is none:
+        caps = json.get_list(media, "caption")
+        if caps is not none and type_of(caps) == "list" and len(caps) > 0:
+            cap = caps[0]
+    if cap is not none:
+        cap_text = json.get_str(cap, "text", "")
+    # first image candidate
+    url = ""
+    iv = json.get_dict(media, "image_versions2")
+    if iv is not none:
+        cands = json.get_list(iv, "candidates")
+        if cands is not none and type_of(cands) == "list" and len(cands) > 0:
+            url = json.get_str(cands[0], "url", "")
+    album = false
+    video = false
+    carousel = json.get_list(media, "carousel_media")
+    if carousel is not none and type_of(carousel) == "list" and len(carousel) > 0:
+        album = true
+        if url == "":
+            iv0 = json.get_dict(carousel[0], "image_versions2")
+            if iv0 is not none:
+                c0 = json.get_list(iv0, "candidates")
+                if c0 is not none and type_of(c0) == "list" and len(c0) > 0:
+                    url = json.get_str(c0[0], "url", "")
+    vv = json.get_list(media, "video_versions")
+    if vv is not none and type_of(vv) == "list" and len(vv) > 0:
+        video = true
+    code = json.get_str(media, "code", "")
+    link = ""
+    if code != "":
+        link = "https://www.instagram.com/p/{code}/"
+    taken = json.get_int(media, "taken_at", 0)
+    return Post(
+        "ig:{mid}",
+        u,
+        cap_text,
+        json.get_int(media, "like_count", 0),
+        json.get_int(media, "comment_count", 0),
+        time_label_from_unix(taken),
+        false, false, "url", url, "", "instagram", link,
+        video, album)
+
+# the home timeline (what instagram.com shows logged in), with a fallback
+# to your own posts when the timeline endpoint refuses
+func ig_fetch_feed(a: Adapter) -> FeedResult:
+    f = ig_get(a, "/api/v1/feed/timeline/")
+    if f.ok:
+        items = json.get_list(f.data, "feed_items")
+        if items is not none and type_of(items) == "list":
+            posts: [Post] = []
+            users: [User] = []
+            for i in range(len(items)):
+                it = items[i]
+                media = json.get_dict(it, "media_or_ad")
+                if media is none:
+                    continue
+                p = ig_map_media(users, media, "{i}")
+                push(posts, p)
+            if len(posts) > 0:
+                more = json.get_bool(f.data, "more_available", false)
+                nxt = json.get_str(f.data, "next_max_id", "")
+                return FeedResult(true, users, posts, more, nxt, "")
+    # fallback: your own profile feed
+    f2 = ig_get(a, "/api/v1/feed/user/{a.ig_ds_user_id}/")
+    if not f2.ok:
+        return FeedResult(false, [], [], false, "", a.last_error)
+    items2 = json.get_list(f2.data, "items")
+    posts2: [Post] = []
+    users2: [User] = []
+    if items2 is not none and type_of(items2) == "list":
+        for i in range(len(items2)):
+            it2 = items2[i]
+            media2 = json.get_dict(it2, "media")
+            if media2 is none:
+                media2 = it2
+            push(posts2, ig_map_media(users2, media2, "{i}"))
+    return FeedResult(len(posts2) > 0, users2, posts2, false, "", "")
+
+# any profile: header info + recent post grid
+func ig_fetch_profile(a: Adapter, username: str) -> ProfileResult:
+    f = ig_get(a, "/api/v1/users/web_profile_info/?username={username}")
+    if not f.ok:
+        return ProfileResult(false, User("", username, "", "initials", "", "", 0, 0, false, false), [], a.last_error)
+    data = json.get_dict(f.data, "data")
+    if data is none:
+        data = f.data
+    user_node = json.get_dict(data, "user")
+    if user_node is none:
+        return ProfileResult(false, User("", username, "", "initials", "", "", 0, 0, false, false), [], "profile not found")
+    upk = json.get_str(user_node, "pk", username)
+    u = User(
+        "ig:{upk}",
+        json.get_str(user_node, "username", username),
+        json.get_str(user_node, "full_name", username),
+        "initials", username,
+        strip_html(json.get_str(user_node, "biography", "")),
+        json.get_int(user_node, "follower_count", 0),
+        json.get_int(user_node, "following_count", 0),
+        json.get_bool(user_node, "is_verified", false),
+        username == "",
+        json.get_str(user_node, "profile_pic_url", ""),
+        json.get_int(user_node, "media_count", 0))
+    if u.avatar_url != "":
+        u.avatar_kind = "url"
+    posts: [Post] = []
+    ff = ig_get(a, "/api/v1/feed/user/{upk}/")
+    if ff.ok:
+        items = json.get_list(ff.data, "items")
+        if items is not none and type_of(items) == "list":
+            for i in range(len(items)):
+                it = items[i]
+                media = json.get_dict(it, "media")
+                if media is none:
+                    media = it
+                push(posts, ig_map_media([], media, "{i}"))
+    return ProfileResult(true, u, posts, "")
+
+# your own profile via the numeric id
+func ig_fetch_me(a: Adapter) -> ProfileResult:
+    f = ig_get(a, "/api/v1/users/{a.ig_ds_user_id}/info/")
+    if not f.ok:
+        return ProfileResult(false, User("", "", "", "initials", "", "", 0, 0, false, true), [], a.last_error)
+    user_node = json.get_dict(f.data, "user")
+    if user_node is none:
+        user_node = f.data
+    username = json.get_str(user_node, "username", "")
+    u = User(
+        "ig:{a.ig_ds_user_id}",
+        username,
+        json.get_str(user_node, "full_name", username),
+        "initials", username,
+        strip_html(json.get_str(user_node, "biography", "")),
+        json.get_int(user_node, "follower_count", 0),
+        json.get_int(user_node, "following_count", 0),
+        json.get_bool(user_node, "is_verified", false),
+        true,
+        json.get_str(user_node, "profile_pic_url", ""),
+        json.get_int(user_node, "media_count", 0))
+    if u.avatar_url != "":
+        u.avatar_kind = "url"
+    return ProfileResult(true, u, [], "")
+
+func ig_self_username(a: Adapter) -> str:
+    return a.status  # unused placeholder; self-detection uses ds_user_id
+
+# user search (topsearch endpoint used by the instagram.com search box)
+func ig_search(a: Adapter, query: str) -> SearchResults:
+    q = net.url_encode(query)
+    if q == "":
+        return SearchResults(true, [], "")
+    f = ig_get(a, "/api/v1/web/search/topsearch/?context=blended&query={q}")
+    if not f.ok:
+        return SearchResults(false, [], a.last_error)
+    users: [User] = []
+    ulist = json.get_list(f.data, "users")
+    if ulist is not none and type_of(ulist) == "list":
+        for i in range(len(ulist)):
+            node = json.get_dict(ulist[i], "user")
+            if node is none:
+                continue
+            uname = json.get_str(node, "username", "")
+            if uname == "":
+                continue
+            pk = json.get_str(node, "pk", uname)
+            u = User("ig:{pk}", uname,
+                json.get_str(node, "full_name", uname),
+                "initials", uname, "",
+                json.get_int(node, "follower_count", 0), 0,
+                json.get_bool(node, "is_verified", false), false,
+                json.get_str(node, "profile_pic_url", ""), 0)
+            if u.avatar_url != "":
+                u.avatar_kind = "url"
+            push(users, u)
+    return SearchResults(true, users, "")
+
+# notifications inbox (best effort; the endpoint may change without notice)
+func ig_fetch_notifications(a: Adapter, users: [User]) -> NotifResult:
+    f = ig_get(a, "/api/v1/news/inbox/")
+    if not f.ok:
+        return NotifResult(false, [], f.error)
+    notifs: [Notif] = []
+    buckets = ["new_stories", "old_stories"]
+    n = 0
+    for bname in buckets:
+        bucket = json.get_list(f.data, bname)
+        if bucket is none or type_of(bucket) != "list":
+            continue
+        for i in range(len(bucket)):
+            if n >= 24:
+                break
+            story = bucket[i]
+            args = json.get_dict(story, "args")
+            if args is none:
+                args = story
+            text = json.get_str(story, "text", "")
+            if text == "":
+                text = json.get_str(args, "text", "")
+            if text == "":
+                continue
+            uname = json.get_str(args, "profile_name", "")
+            pid = json.get_str(args, "profile_id", "")
+            if uname == "":
+                uname = "instagram"
+            tu = find_or_make_user(users, "ig:{pid}", uname, uname, "")
+            kind = "other"
+            tl = text.lower()
+            if tl.contains("liked"):
+                kind = "like"
+            elif tl.contains("comment"):
+                kind = "comment"
+            elif tl.contains("started following"):
+                kind = "follow"
+            elif tl.contains("mentioned"):
+                kind = "mention"
+            ts = json.get_int(story, "ts", 0)
+            if ts == 0:
+                ts = json.get_int(args, "ts", 0)
+            # trim instagram's template text to something readable
+            label = text
+            cut = find_sub(label, " Learn more")
+            if cut > 0:
+                label = label[0:cut]
+            label = label.replace("  ", " ").trim()
+            push(notifs, Notif("n{n}", kind, tu, label, time_label_from_unix(ts), "{n}"))
+            n = n + 1
+    return NotifResult(n > 0, notifs, "")
+
+# ------------------------------------------------------------- fediverse
+# Optional secondary backend: live public timelines from open Mastodon /
+# Pixelfed instances. Select it in Settings -> Account.
 
 FEDI_INSTANCES = ["mastodon.world", "fosstodon.org", "mas.to", "mastodon.social"]
 
 func fedi_user_agent() -> str:
-    return "Wingram/0.1 (Still desktop client; +https://github.com/StillAdum/wingram)"
+    return "Wingram/0.2 (Still desktop client; +https://github.com/StillAdum/wingram)"
 
 func fedi_fetch_timeline(a: Adapter, limit: int) -> FetchResult:
     order = [a.instance]
@@ -97,18 +401,17 @@ func fedi_fetch_timeline(a: Adapter, limit: int) -> FetchResult:
             last_err = "{inst}: bad JSON ({res.error})"
             continue
         if type_of(res.value) != "list":
-            # {"error": "..."} shape
             last_err = "{inst}: {json.get_str(res.value, "error", "unexpected response")}"
             continue
         a.instance = inst
         a.status = "live from {inst}"
+        a.last_error = ""
         return FetchResult(true, res.value, "")
     a.last_error = last_err
     a.status = "fediverse unavailable"
     return FetchResult(false, none, last_err)
 
 func fedi_map_statuses(statuses: any, out_users: [User]) -> FeedResult:
-    # returns (posts, users) — users grows with accounts seen in the timeline
     posts: [Post] = []
     users = out_users
     n = len(statuses)
@@ -126,10 +429,8 @@ func fedi_map_statuses(statuses: any, out_users: [User]) -> FeedResult:
         if content == "":
             content = "(media post)"
         created = json.get_str(s, "created_at", "")
-        label = time_label_from_iso(created)
+        label = fedi_time_label(created)
         pid = "fv:{sid}"
-        seed = "{i}"
-        purl = json.get_str(s, "url", "")
         p = Post(
             pid,
             u,
@@ -137,9 +438,17 @@ func fedi_map_statuses(statuses: any, out_users: [User]) -> FeedResult:
             json.get_int(s, "favourites_count", 0),
             json.get_int(s, "replies_count", 0),
             label,
-            false, false, "gradient", seed, "", "fediverse", purl)
+            false, false, "gradient", "{i}", "", "fediverse",
+            json.get_str(s, "url", ""),
+            false, false)
         push(posts, p)
-    return FeedResult(true, users, posts)
+    return FeedResult(true, users, posts, false, "", "")
+
+func fedi_time_label(iso: str) -> str:
+    # fediverse created_at is ISO; Wingram shows the HH:MM of the post
+    if len(iso) >= 16:
+        return "{iso[11:16]}"
+    return ""
 
 func find_or_make_user(users: [User], uid: str, username: str, display: str, bio: str) -> User:
     for u in users:
@@ -149,134 +458,13 @@ func find_or_make_user(users: [User], uid: str, username: str, display: str, bio
     push(users, u2)
     return u2
 
-# "2026-11-19T18:33:33.000Z" -> a friendly relative label
-func time_label_from_iso(iso: str) -> str:
-    if len(iso) < 10:
-        return ""
-    year = iso[0:4]
-    today = clock_today_iso()
-    if year != today:
-        return "{year}"
-    hh = iso[11:13]
-    mm = iso[14:16]
-    return "{hh}:{mm}"
-
-func clock_today_iso() -> str:
-    # still's clock() returns unix seconds; derive a stable "this year" tag
-    t = clock()
-    years = 1970 + int(t / 31556952.0)
-    return "{years}"
-
-# ---------------------------------------------------------------- instagram
-# Experimental sessionid-based read-only client, mirroring instagrapi's
-# login_by_sessionid flow: sessionid -> ds_user_id (leading digits), then
-# requests carry the session cookie plus the app headers.
-
-IG_APP_ID = "936619743392459"
-IG_UA = "Instagram 219.0.0.12.117 Android (26/8.0.0; 480dpi; 1080x1920; samsung; SM-G960F; dreamltexx; sdm845; en_US; 269990621)"
-
-func ig_extract_user_id(sessionid: str) -> str:
-    # instagrapi: the leading digits of the sessionid are the user id
-    out = ""
-    for i in range(len(sessionid)):
-        c = sessionid[i]
-        if c >= "0" and c <= "9":
-            out += c
-        else:
-            break
-    return out
-
-func ig_headers(a: Adapter) -> str:
-    h = "User-Agent: {IG_UA}\nX-IG-App-ID: {IG_APP_ID}\nAccept: */*\n"
-    h = h + "Cookie: sessionid={a.ig_sessionid}; ds_user_id={a.ig_ds_user_id}"
-    if a.ig_ds_user_id != "":
-        h = h + "\nIG-INTENDED-USER-ID: {a.ig_ds_user_id}"
-    return h
-
-func ig_get(a: Adapter, path: str) -> FetchResult:
-    if a.ig_sessionid == "":
-        a.last_error = "no sessionid configured (Settings -> Account)"
-        return FetchResult(false, none, a.last_error)
-    r = net.get("https://i.instagram.com{path}", ig_headers(a), 20000)
-    if not r.ok:
-        a.last_error = r.error
-        return FetchResult(false, none, a.last_error)
-    if r.status != 200:
-        a.last_error = "instagram returned {r.status} (login expired? banned? rate limited?)"
-        return FetchResult(false, none, a.last_error)
-    res = json.parse(r.body)
-    if not res.ok:
-        a.last_error = "instagram sent invalid JSON"
-        return FetchResult(false, none, a.last_error)
-    a.status = "instagram session active"
-    return FetchResult(true, res.value, "")
-
-func ig_fetch_profile(a: Adapter, username: str, users: [User]) -> ProfileResult:
-    f1 = ig_get(a, "/api/v1/users/web_profile_info/?username={username}")
-    data = f1.data
-    if not f1.ok:
-        # web_profile_info wants the web app id; fall back to private user info
-        f2 = ig_get(a, "/api/v1/users/usernameinfo/?username={username}")
-        if not f2.ok:
-            return ProfileResult(false, User("", "", "", "initials", "", "", 0, 0, false, false), [])
-        data = f2.data
-    user_node = json.get_dict(data, "user")
-    if user_node is none:
-        user_node = data
-    upk = json.get_str(user_node, "pk", json.get_str(user_node, "id", username))
-    uid = "ig:{upk}"
-    u = User(
-        uid,
-        json.get_str(user_node, "username", username),
-        json.get_str(user_node, "full_name", username),
-        "initials", username,
-        strip_html(json.get_str(user_node, "biography", "")),
-        json.get_int(user_node, "follower_count", 0),
-        json.get_int(user_node, "following_count", 0),
-        json.get_bool(user_node, "is_verified", false),
-        false)
-    push(users, u)
-    posts: [Post] = []
-    # user feed (12 most recent). Endpoints drift; failure is non-fatal.
-    ff = ig_get(a, "/api/v1/feed/user/{upk}/")
-    if ff.ok:
-        items = json.get_list(ff.data, "items")
-        for i in range(len(items)):
-            it = items[i]
-            media = json.get_dict(it, "media")
-            if media is none:
-                media = it
-            mid = json.get_str(media, "id", "{i}")
-            pid = "ig:{mid}"
-            cap = json.get_dict(media, "caption")
-            cap_text = json.get_str(cap, "text", "(no caption)")
-            seed = "{i}"
-            p = Post(
-                pid,
-                u,
-                cap_text,
-                json.get_int(media, "like_count", 0),
-                json.get_int(media, "comment_count", 0),
-                "",
-                false, false, "gradient", seed, "", "instagram", "")
-            push(posts, p)
-    return ProfileResult(true, u, posts)
-
 # ------------------------------------------------------------- dispatch
 
-func refresh_feed(a: Adapter, target_username: str) -> FeedResult:
+func refresh_feed(a: Adapter) -> FeedResult:
     if a.mode == "fediverse":
         fr = fedi_fetch_timeline(a, 20)
         if fr.ok:
             mapped = fedi_map_statuses(fr.data, [])
-            return FeedResult(true, mapped.users, mapped.posts)
-        return FeedResult(false, [], [])
-    if a.mode == "instagram":
-        pr = ig_fetch_profile(a, target_username, [])
-        if pr.ok:
-            return FeedResult(true, [pr.user], pr.posts)
-        return FeedResult(false, [], [])
-    # local
-    users = demo_users()
-    posts = demo_posts(users)
-    return FeedResult(true, users, posts)
+            return FeedResult(true, mapped.users, mapped.posts, false, "", "")
+        return FeedResult(false, [], [], false, "", a.last_error)
+    return ig_fetch_feed(a)

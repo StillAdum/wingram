@@ -1,56 +1,113 @@
-# screen_explore — the explore/search screen: search box + photo grid
+# screen_explore — real Instagram user search
 #
-# The grid reuses post gradient art. Search filters local posts and demos
-# the search UX; fediverse search arrives with the v0.2 adapter work.
+# The search box hits the same topsearch endpoint the instagram.com search
+# bar uses. Results are real accounts: tap one to open their profile. A
+# local filter over the already-loaded feed is shown when the query matches
+# captions too, so the screen stays useful while typing.
 
 use gui
 use "src/theme.strc"
-use "src/types.strc": User, Post
+use "src/types.strc": User, Post, count_format
 use "src/ui_kit.strc"
+use "src/imagepipe.strc"
 use "src/app.strc"
-use "src/adapters.strc"
+use "src/adapters.strc": ig_search
 
 func render(app: App) -> App:
     win = app.win
     t = app.theme
-    x0 = 24.0
-    w = float(t.center_w) + 200.0
-    y = 20.0
-    gui.text_bold(win, x0, y, "Explore", t.text, 24)
-    y = y + 44.0
-    box_w = 300.0
-    q, f = text_input_box(win, t, x0, y, box_w, 40.0, app.search_query, app.search_focus, "search Wingram")
-    app.search_query = q
-    app.search_focus = f
-    app.search_query = apply_typed(win, app.search_query, app.search_focus)
-    y = y + 56.0
-    # grid
-    cell = 118.0
-    gap = 4.0
-    cols = int((w - 24.0) / (cell + gap))
+    s = app.scale
+    x0 = 24.0 * s
+    gw = float(gui.width(win))
+    w = gw - x0 - 24.0 * s
+    y = 20.0 * s
+    gui.text_bold(win, x0, y, "Search", t.text, 24.0 * s)
+    y = y + 44.0 * s
+    box_w = 320.0 * s
+    q, f = text_input_box(win, t, x0, y, box_w, 38.0 * s, app.search_query, app.search_focus, "search instagram users")
+    if f and not app.search_focus:
+        app.search_focus = true
+    if not f and app.search_focus and gui.mouse_clicked(win):
+        app.search_focus = false
+    if app.search_focus:
+        app.search_query = apply_typed(win, q, true)
+    else:
+        app.search_query = q
+    y = y + 54.0 * s
+
+    query = app.search_query.lower().trim()
+    if query == "":
+        gui.text(win, x0, y, "type a username — results come straight from instagram", t.text_dim, 13.0 * s)
+        app = render_feed_grid(app, x0, y + 30.0 * s, w)
+        return app
+
+    # live search (one blocking request when the query changed)
+    if app.search_pending != query:
+        app.search_pending = query
+        r = ig_search(app.adapter, query)
+        if r.ok:
+            app.search_results = r.users
+            app.search_done = true
+            app.search_error = ""
+        else:
+            app.search_results = []
+            app.search_done = true
+            app.search_error = r.error
+    if app.search_error != "":
+        gui.text(win, x0, y, "search failed: {app.search_error}", t.like, 13.0 * s)
+    elif len(app.search_results) == 0:
+        gui.text(win, x0, y, "no users found for \"{query}\"", t.text_dim, 14.0 * s)
+    # user rows
+    row_h = 54.0 * s
+    for i in range(len(app.search_results)):
+        u = app.search_results[i]
+        rowy = y + float(i) * row_h
+        if rowy > y + float(gui.height(win)):
+            break
+        if hovered(win, x0, rowy, w, row_h):
+            gui.fill_round(win, x0, rowy, w if w < 520.0 * s else 520.0 * s, row_h - 4.0 * s, 8.0 * s, t.surface2)
+        imagepipe.draw_avatar(app, u, x0 + 24.0 * s, rowy + row_h / 2.0, 16.0 * s, false, false)
+        draw_username(win, t, u, x0 + 52.0 * s, rowy + 10.0 * s, 14.0 * s)
+        if u.full_name != "":
+            gui.text(win, x0 + 52.0 * s, rowy + 30.0 * s, u.full_name, t.text_dim, 12.0 * s)
+        if click_zone(win, x0, rowy, w if w < 520.0 * s else 520.0 * s, row_h):
+            app.screen = "profile"
+            app.profile_owner = u.username
+            app.profile_user = User("", "", "", "initials", "", "", 0, 0, false, false)
+            app.profile_posts = []
+            app.profile_error = ""
+            app.set_scroll("profile", 0)
+            app.search_focus = false
+    return app
+
+# thumbnails of the loaded feed (also the pre-search filler)
+func render_feed_grid(app: App, x0: float, y: float, w: float) -> App:
+    t = app.theme
+    s = app.scale
+    win = app.win
+    cell = 108.0 * s
+    gap = 6.0 * s
+    cols = int(w / (cell + gap))
     if cols < 3:
         cols = 3
     shown = 0
-    query = app.search_query.lower().trim()
+    gh = float(gui.height(app.win))
     for i in range(len(app.posts)):
         p = app.posts[i]
-        if query != "" and not (p.caption.lower().contains(query) or p.user.username.lower().contains(query)):
-            continue
         col = shown % cols
         row = shown / cols
         cx = x0 + float(col) * (cell + gap)
         cy = y + float(row) * (cell + gap)
-        pair = gradient_pair(p.photo_arg)
-        gui.fill_rect(win, cx, cy, cell, cell, pair.0)
-        gui.fill_round(win, cx + cell / 2.0 - 22.0, cy + cell / 2.0 - 22.0, 44.0, 44.0, 8.0, lerp_color(pair.1, 0xFFFFFF, 0.25))
-        # likes label on hover
-        if hovered(win, cx, cy, cell, cell):
-            gui.fill_rect(win, cx, cy + cell - 24.0, cell, 24.0, lerp_color(0x000000, pair.1, 0.25))
-            gui.text_bold(win, cx + 8.0, cy + cell - 20.0, "{p.likes} likes", 0xFFFFFF, 12)
+        if cy > gh:
+            break
+        imagepipe.draw(app, p.photo_arg, cx, cy, cell, cell)
         if click_zone(win, cx, cy, cell, cell):
             app.screen = "profile"
-            app.profile_user = p.user.username
+            app.profile_owner = p.user.username
+            app.profile_user = User("", "", "", "initials", "", "", 0, 0, false, false)
+            app.profile_posts = []
+            app.profile_error = ""
         shown = shown + 1
     if shown == 0:
-        gui.text(win, x0, y + 20.0, "no results for \"{query}\"", t.text_dim, 14)
+        gui.text(app.win, x0, y + 10.0 * s, "your feed will appear here once posts load", t.text_dim, 13.0 * s)
     return app

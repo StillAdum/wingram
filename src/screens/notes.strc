@@ -11,8 +11,8 @@ use "src/theme.strc"
 use "src/types.strc": User, NoteItem
 use "src/songs.strc": Song
 use "src/ui_kit.strc"
+use "src/imagepipe.strc"
 use "src/app.strc"
-use "src/adapters.strc"
 use "src/storage.strc": NOTES_FILE
 
 MAX_NOTE_CHARS = 60
@@ -20,31 +20,32 @@ MAX_NOTE_CHARS = 60
 func render(app: App) -> App:
     win = app.win
     t = app.theme
-    x0 = 24.0
-    y = 20.0
-    gui.text_bold(win, x0, y, "New note", t.text, 24)
-    gui.text(win, x0 + 130.0, y + 8.0, "notes live for 24 hours", t.text_faint, 12)
-    y = y + 56.0
+    s = app.scale
+    x0 = 28.0 * s
+    y = 18.0 * s
+    gui.text_bold(win, x0, y, "New note", t.text, 24.0 * s)
+    gui.text(win, x0 + 128.0 * s, y + 8.0 * s, "notes live for 24 hours", t.text_faint, 12.0 * s)
+    y = y + 52.0 * s
     # the bubble preview: draw what the note will look like on the tray
-    bubble_w = 150.0
+    bubble_w = 150.0 * s
     if app.compose_song != "":
-        s = app.catalog.find(app.compose_song)
-        gui.fill_round(win, x0, y, bubble_w + 60.0, 40.0, 20.0, t.note_self)
-        icon_music(win, t, x0 + 12.0, y + 11.0, 16.0, t.sticker_b)
-        gui.text_bold(win, x0 + 34.0, y + 11.0, s.title, t.text, 13)
+        song = app.catalog.find(app.compose_song)
+        gui.fill_round(win, x0, y, bubble_w + 60.0 * s, 40.0 * s, 20.0 * s, t.note_self)
+        icon_music(win, t, x0 + 12.0 * s, y + 11.0 * s, 16.0 * s, t.sticker_b)
+        gui.text_bold(win, x0 + 34.0 * s, y + 11.0 * s, song.title, t.text, 13.0 * s)
     else:
-        gui.fill_round(win, x0, y, bubble_w, 40.0, 20.0, t.note_self)
+        gui.fill_round(win, x0, y, bubble_w, 40.0 * s, 20.0 * s, t.note_self)
         preview = app.compose_text
         if preview == "":
             preview = "your note here"
-        gui.clip_push(win, x0 + 4.0, y, bubble_w - 8.0, 40.0)
-        gui.text(win, x0 + 12.0, y + 11.0, preview, t.text, 13)
+        gui.clip_push(win, x0 + 4.0 * s, y, bubble_w - 8.0 * s, 40.0 * s)
+        gui.text(win, x0 + 12.0 * s, y + 11.0 * s, preview, t.text, 13.0 * s)
         gui.clip_pop(win)
-    draw_avatar(win, t, app.me, x0 + bubble_w / 2.0 + (30.0 if app.compose_song != "" else 0.0), y + 66.0, 22.0, false, false)
-    y = y + 110.0
+    imagepipe.draw_avatar(app, app.me, x0 + bubble_w / 2.0 + (30.0 * s if app.compose_song != "" else 0.0), y + 64.0 * s, 22.0 * s, false, false)
+    y = y + 106.0 * s
     # text input
-    gui.text(win, x0, y - 22.0, "note text", t.text_dim, 12)
-    buf, f = text_input_box(win, t, x0, y, 420.0, 44.0, app.compose_text, app.compose_focus, "what's happening?")
+    gui.text(win, x0, y - 22.0 * s, "note text", t.text_dim, 12.0 * s)
+    buf, f = text_input_box(win, t, x0, y, 420.0 * s, 44.0 * s, app.compose_text, app.compose_focus, "what's happening?")
     if f and not app.compose_focus:
         app.compose_focus = true
     if not f and app.compose_focus and gui.mouse_clicked(win):
@@ -55,21 +56,21 @@ func render(app: App) -> App:
     col = t.text_dim
     if left < 10:
         col = t.like
-    gui.text(win, x0 + 430.0, y + 14.0, "{left}", col, 14)
-    y = y + 62.0
+    gui.text(win, x0 + 430.0 * s, y + 14.0 * s, "{left}", col, 14.0 * s)
+    y = y + 62.0 * s
     # song row
-    gui.text(win, x0, y - 22.0, "add a song", t.text_dim, 12)
+    gui.text(win, x0, y - 22.0 * s, "add a song", t.text_dim, 12.0 * s)
     if app.compose_song != "":
-        s = app.catalog.find(app.compose_song)
-        gui.fill_round(win, x0, y, 250.0, 40.0, 20.0, lerp_color(s.cover_a, s.cover_b, 0.5))
-        icon_music(win, t, x0 + 12.0, y + 11.0, 16.0, 0xFFFFFF)
-        gui.text_bold(win, x0 + 36.0, y + 12.0, "{s.title} — {s.artist}", 0xFFFFFF, 13)
+        song = app.catalog.find(app.compose_song)
+        gui.fill_round(win, x0, y, 250.0 * s, 40.0 * s, 20.0 * s, lerp_color(song.cover_a, song.cover_b, 0.5))
+        icon_music(win, t, x0 + 12.0 * s, y + 11.0 * s, 16.0 * s, 0xFFFFFF)
+        gui.text_bold(win, x0 + 36.0 * s, y + 12.0 * s, "{song.title} — {song.artist}", 0xFFFFFF, 13.0 * s)
         # play/stop preview
-        px = x0 + 260.0
+        px = x0 + 260.0 * s
         label = "play"
         if app.preview_song == app.compose_song and app.preview_playing:
             label = "stop"
-        if draw_button(win, t, px, y, 80.0, 40.0, label, false):
+        if draw_button(win, t, px, y, 80.0 * s, 40.0 * s, label, false):
             if label == "play":
                 if play_preview(app.catalog, app.compose_song):
                     app.preview_song = app.compose_song
@@ -81,23 +82,23 @@ func render(app: App) -> App:
                 app.preview_playing = false
                 app.preview_song = ""
         # remove song
-        if draw_button(win, t, px + 90.0, y, 80.0, 40.0, "remove", false):
+        if draw_button(win, t, px + 90.0 * s, y, 80.0 * s, 40.0 * s, "remove", false):
             app.compose_song = ""
-            if app.preview_song == s.id:
+            if app.preview_song == song.id:
                 stop_preview()
                 app.preview_playing = false
                 app.preview_song = ""
     else:
-        if draw_button(win, t, x0, y, 180.0, 40.0, "pick a song", true):
+        if draw_button(win, t, x0, y, 180.0 * s, 40.0 * s, "pick a song", true):
             app.picker_open = true
             app.song_query = ""
             app.song_query_focus = false
-        gui.text(win, x0 + 196.0, y + 13.0, "like the mobile music sticker", t.text_faint, 12)
-    y = y + 62.0
+        gui.text(win, x0 + 196.0 * s, y + 13.0 * s, "like the mobile music sticker", t.text_faint, 12.0 * s)
+    y = y + 62.0 * s
     # actions
-    if draw_button(win, t, x0, y, 140.0, 44.0, "post note", true):
+    if draw_button(win, t, x0, y, 140.0 * s, 44.0 * s, "post note", true):
         app = post_note(app)
-    if draw_button(win, t, x0 + 156.0, y, 120.0, 44.0, "cancel", false):
+    if draw_button(win, t, x0 + 156.0 * s, y, 120.0 * s, 44.0 * s, "cancel", false):
         app.screen = "feed"
         stop_preview()
         app.preview_playing = false
@@ -140,60 +141,65 @@ PICKER_H = 400
 func render_song_picker(app: App) -> App:
     win = app.win
     t = app.theme
-    px = 80.0
-    py = 60.0
+    s = app.scale
+    pw = float(PICKER_W) * s
+    ph = float(PICKER_H) * s
+    gw = float(gui.width(win))
+    gh = float(gui.height(win))
+    px = (gw - pw) / 2.0
+    py = (gh - ph) / 2.0
     # dim backdrop
-    gui.fill_rect(win, 0.0, 0.0, float(gui.width(win)), float(gui.height(win)), lerp_color(0x000000, t.bg, 0.65))
-    gui.fill_round(win, px, py, float(PICKER_W), float(PICKER_H), 12.0, t.surface)
-    gui.text_bold(win, px + 20.0, py + 18.0, "Choose a song", t.text, 18)
-    if draw_button(win, t, px + float(PICKER_W) - 90.0, py + 14.0, 70.0, 32.0, "close", false):
+    gui.fill_rect(win, 0.0, 0.0, gw, gh, lerp_color(0x000000, t.bg, 0.65))
+    gui.fill_round(win, px, py, pw, ph, 12.0 * s, t.surface)
+    gui.text_bold(win, px + 20.0 * s, py + 18.0 * s, "Choose a song", t.text, 18.0 * s)
+    if draw_button(win, t, px + pw - 90.0 * s, py + 14.0 * s, 70.0 * s, 32.0 * s, "close", false):
         app.picker_open = false
         return app
     # search box
-    q, f = text_input_box(win, t, px + 20.0, py + 56.0, float(PICKER_W) - 40.0, 38.0, app.song_query, app.song_query_focus, "search songs and artists")
+    q, f = text_input_box(win, t, px + 20.0 * s, py + 56.0 * s, pw - 40.0 * s, 38.0 * s, app.song_query, app.song_query_focus, "search songs and artists")
     app.song_query_focus = f
     app.song_query = apply_typed(win, q, app.song_query_focus)
     # list
     results = app.catalog.search(app.song_query)
-    ly = py + 108.0
-    row_h = 44.0
+    ly = py + 108.0 * s
+    row_h = 44.0 * s
     for i in range(len(results)):
-        if ly + row_h > py + float(PICKER_H) - 16.0:
+        if ly + row_h > py + ph - 16.0 * s:
             break
-        s = results[i]
+        song = results[i]
         rowy = ly + float(i) * row_h
-        hot = hovered(win, px + 12.0, rowy, float(PICKER_W) - 24.0, row_h)
+        hot = hovered(win, px + 12.0 * s, rowy, pw - 24.0 * s, row_h)
         if hot:
-            gui.fill_round(win, px + 12.0, rowy, float(PICKER_W) - 24.0, row_h - 4.0, 8.0, t.surface2)
+            gui.fill_round(win, px + 12.0 * s, rowy, pw - 24.0 * s, row_h - 4.0 * s, 8.0 * s, t.surface2)
         # cover chip
-        gui.fill_round(win, px + 20.0, rowy + 6.0, 32.0, 32.0, 8.0, lerp_color(s.cover_a, s.cover_b, 0.5))
-        icon_music(win, t, px + 28.0, rowy + 14.0, 16.0, 0xFFFFFF)
-        gui.text_bold(win, px + 64.0, rowy + 6.0, s.title, t.text, 14)
-        gui.text(win, px + 64.0, rowy + 24.0, "{s.artist} • {s.duration_s}s", t.text_dim, 12)
+        gui.fill_round(win, px + 20.0 * s, rowy + 6.0 * s, 32.0 * s, 32.0 * s, 8.0 * s, lerp_color(song.cover_a, song.cover_b, 0.5))
+        icon_music(win, t, px + 28.0 * s, rowy + 14.0 * s, 16.0 * s, 0xFFFFFF)
+        gui.text_bold(win, px + 64.0 * s, rowy + 6.0 * s, song.title, t.text, 14.0 * s)
+        gui.text(win, px + 64.0 * s, rowy + 24.0 * s, "{song.artist} • {song.duration_s}s", t.text_dim, 12.0 * s)
         # preview button
-        playing = app.preview_song == s.id and app.preview_playing
+        playing = app.preview_song == song.id and app.preview_playing
         plabel = "stop"
         if not playing:
             plabel = "play"
-        if draw_button(win, t, px + float(PICKER_W) - 190.0, rowy + 4.0, 64.0, 30.0, plabel, playing):
+        if draw_button(win, t, px + pw - 190.0 * s, rowy + 4.0 * s, 64.0 * s, 30.0 * s, plabel, playing):
             if playing:
                 stop_preview()
                 app.preview_playing = false
                 app.preview_song = ""
             else:
-                if play_preview(app.catalog, s.id):
-                    app.preview_song = s.id
+                if play_preview(app.catalog, song.id):
+                    app.preview_song = song.id
                     app.preview_playing = true
                 else:
                     app.toast_for("audio backend unavailable (needs Windows)", 2.5)
         # pick button
-        if draw_button(win, t, px + float(PICKER_W) - 118.0, rowy + 4.0, 64.0, 30.0, "pick", true):
-            app.compose_song = s.id
+        if draw_button(win, t, px + pw - 118.0 * s, rowy + 4.0 * s, 64.0 * s, 30.0 * s, "pick", true):
+            app.compose_song = song.id
             app.picker_open = false
             stop_preview()
             app.preview_playing = false
             app.preview_song = ""
-            app.toast_for("attached {s.title}", 2.0)
+            app.toast_for("attached {song.title}", 2.0)
     if len(results) == 0:
-        gui.text(win, px + 20.0, ly + 10.0, "no songs match", t.text_faint, 13)
+        gui.text(win, px + 20.0 * s, ly + 10.0 * s, "no songs match", t.text_faint, 13.0 * s)
     return app

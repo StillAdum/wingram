@@ -1,101 +1,126 @@
-# screen_profile — profile header with stats and a post grid
+# screen_profile — real profile header with stats and a post grid
+#
+# Your own profile (nav) uses the numeric session id; tapping a username in
+# the feed loads that profile live via web_profile_info. The grid shows the
+# account's recent posts with their real images.
 
 use gui
+use media
 use "src/theme.strc"
-use "src/types.strc": User, Post
+use "src/types.strc": User, Post, count_format
 use "src/ui_kit.strc"
+use "src/imagepipe.strc"
 use "src/app.strc"
-use "src/adapters.strc"
+use "src/adapters.strc": ig_fetch_profile
 
 func render(app: App) -> App:
     win = app.win
     t = app.theme
-    x0 = 24.0
-    y = 20.0
-    # resolve the profile user
-    target = app.profile_user
-    u = find_user(app, target)
-    if u.id == "" and target == "":
-        u = app.me
-    if u.id == "":
-        gui.text_bold(win, x0, y, "Profile", t.text, 24)
-        gui.text(win, x0, y + 40.0, "no profile selected", t.text_dim, 14)
+    s = app.scale
+    x0 = 24.0 * s
+    y = 16.0 * s
+    # resolve which profile to show + fetch when it changes
+    target = app.profile_owner
+    if target == "":
+        target = app.me.username
+        if target == "":
+            gui.text_bold(win, x0, y, "Profile", t.text, 24.0 * s)
+            gui.text(win, x0, y + 40.0 * s, "loading your profile...", t.text_dim, 14.0 * s)
+            return app
+    u = app.profile_user
+    if u.username != target:
+        u = lookup_user(app, target)
+    if u.id == "" or u.username == "":
+        # need a fetch (first visit or switched profile)
+        if app.profile_error != "loading:{target}":
+            app.profile_error = "loading:{target}"
+            pr = ig_fetch_profile(app.adapter, target)
+            if pr.ok:
+                app.profile_user = pr.user
+                app.profile_posts = pr.posts
+                app.profile_error = ""
+            else:
+                app.profile_user = User("", target, "", "initials", "", "", 0, 0, false, false)
+                app.profile_posts = []
+                app.profile_error = pr.error
+            return app
+        gui.text_bold(win, x0, y, "Profile", t.text, 24.0 * s)
+        gui.text(win, x0, y + 40.0 * s, "loading @{target}...", t.text_dim, 14.0 * s)
         return app
+    u.is_self = u.username == app.me.username
     # header
-    draw_avatar(win, t, u, x0 + 54.0, y + 54.0, 42.0, false, false)
-    name_x = x0 + 120.0
-    draw_username(win, t, u, name_x, y + 18.0, 20)
-    # stats row: posts / followers / following
-    stats_x = name_x + float(gui.text_width(win, u.username, 20)) + 24.0
-    posts_n = count_posts_of(app, u)
-    stat1 = "{posts_n} posts"
-    stat2 = "{u.followers} followers"
-    stat3 = "{u.following} following"
-    gui.text(win, stats_x, y + 24.0, stat1, t.text, 15)
-    gui.text(win, stats_x + 90.0, y + 24.0, stat2, t.text, 15)
-    gui.text(win, stats_x + 210.0, y + 24.0, stat3, t.text, 15)
-    # full name + bio
+    imagepipe.draw_avatar(app, u, x0 + 52.0 * s, y + 52.0 * s, 40.0 * s, false, false)
+    name_x = x0 + 116.0 * s
+    draw_username(win, t, u, name_x, y + 14.0 * s, 20.0 * s)
+    stats_x = name_x + float(gui.text_width(win, u.username, 20.0 * s)) + 22.0 * s
+    posts_n = len(app.profile_posts)
+    if u.post_count > 0:
+        posts_n = u.post_count
+    gui.text(win, stats_x, y + 20.0 * s, "{count_format(posts_n)} posts", t.text, 15.0 * s)
+    gui.text(win, stats_x + 92.0 * s, y + 20.0 * s, "{count_format(u.followers)} followers", t.text, 15.0 * s)
+    gui.text(win, stats_x + 212.0 * s, y + 20.0 * s, "{count_format(u.following)} following", t.text, 15.0 * s)
     if u.full_name != "":
-        gui.text_bold(win, name_x, y + 52.0, u.full_name, t.text, 14)
+        gui.text_bold(win, name_x, y + 48.0 * s, u.full_name, t.text, 14.0 * s)
     if u.bio != "":
-        gui.text(win, name_x, y + 74.0, u.bio, t.text_dim, 13)
+        gui.clip_push(win, name_x, y + 68.0 * s, float(gui.width(win)) - name_x - 40.0 * s, 34.0 * s)
+        gui.text(win, name_x, y + 70.0 * s, u.bio, t.text_dim, 13.0 * s)
+        gui.clip_pop(win)
     # actions
-    ay = y + 110.0
+    ay = y + 108.0 * s
     if u.is_self:
-        if draw_button(win, t, name_x, ay, 130.0, 36.0, "edit profile", false):
-            app.toast_for("profile editing arrives in v0.2", 2.0)
-        if draw_button(win, t, name_x + 140.0, ay, 130.0, 36.0, "settings", false):
+        if draw_button(win, t, name_x, ay, 120.0 * s, 34.0 * s, "edit profile", false):
+            app.toast_for("profile editing arrives in a later build", 2.0)
+        if draw_button(win, t, name_x + 130.0 * s, ay, 110.0 * s, 34.0 * s, "settings", false):
             app.screen = "settings"
     else:
-        if draw_button(win, t, name_x, ay, 130.0, 36.0, "follow", true):
-            app.toast_for("following is read-only in v0.1", 2.0)
-        if draw_button(win, t, name_x + 140.0, ay, 130.0, 36.0, "message", false):
-            app.screen = "dm"
-    if u.id != app.me.id:
-        if draw_button(win, t, name_x + 290.0, ay, 130.0, 36.0, "back", false):
+        if draw_button(win, t, name_x, ay, 120.0 * s, 34.0 * s, "follow", true):
+            app.toast_for("following is read-only in this build", 2.0)
+        if draw_button(win, t, name_x + 130.0 * s, ay, 110.0 * s, 34.0 * s, "message", false):
+            app.toast_for("dm support arrives in a later build", 2.0)
+        if draw_button(win, t, name_x + 250.0 * s, ay, 90.0 * s, 34.0 * s, "back", false):
             app.screen = "feed"
-    y = ay + 60.0
+    y = ay + 56.0 * s
     # tabs
-    gui.fill_rect(win, x0, y, float(t.center_w) + 200.0, 1.0, t.border)
-    gui.fill_rect(win, x0, y, 120.0, 2.0, t.text)
-    gui.text_bold(win, x0 + 34.0, y + 10.0, "POSTS", t.text, 13)
-    gui.text(win, x0 + 154.0, y + 10.0, "REELS", t.text_dim, 13)
-    gui.text(win, x0 + 254.0, y + 10.0, "TAGGED", t.text_dim, 13)
-    y = y + 36.0
-    # grid of this user's posts
-    cell = 130.0
-    gap = 6.0
-    cols = 4
+    gui.fill_rect(win, x0, y, float(gui.width(win)) - x0 - 24.0 * s, 1.0 * s, t.border)
+    gui.fill_rect(win, x0, y, 110.0 * s, 2.0 * s, t.text)
+    gui.text_bold(win, x0 + 30.0 * s, y + 10.0 * s, "POSTS", t.text, 13.0 * s)
+    gui.text(win, x0 + 150.0 * s, y + 10.0 * s, "REELS", t.text_dim, 13.0 * s)
+    gui.text(win, x0 + 240.0 * s, y + 10.0 * s, "TAGGED", t.text_dim, 13.0 * s)
+    y = y + 34.0 * s
+    # grid of this profile's posts
+    cell = 106.0 * s
+    gap = 6.0 * s
+    gw = float(gui.width(win))
+    cols = int((gw - x0 - 24.0 * s) / (cell + gap))
+    if cols < 3:
+        cols = 3
     shown = 0
-    for i in range(len(app.posts)):
-        p = app.posts[i]
-        if p.user.id != u.id:
-            continue
+    for i in range(len(app.profile_posts)):
+        p = app.profile_posts[i]
         col = shown % cols
         row = shown / cols
         cx = x0 + float(col) * (cell + gap)
         cy = y + float(row) * (cell + gap)
-        pair = gradient_pair(p.photo_arg)
-        gui.fill_rect(win, cx, cy, cell, cell, pair.0)
-        if p.song_id != "":
-            gui.fill_round(win, cx + 8.0, cy + cell - 34.0, 100.0, 24.0, 12.0, lerp_color(0x000000, pair.1, 0.4))
-            icon_music(win, t, cx + 14.0, cy + cell - 30.0, 14.0, 0xFFFFFF)
+        imagepipe.draw(app, p.photo_arg, cx, cy, cell, cell)
+        if p.album or p.video:
+            gui.fill_round(win, cx + cell - 26.0 * s, cy + 6.0 * s, 20.0 * s, 20.0 * s, 6.0 * s, lerp_color(0x000000, 0xFFFFFF, 0.25))
+            gui.text_bold(win, cx + cell - 21.0 * s, cy + 10.0 * s, "+" if p.album else ">", 0xFFFFFF, 12.0 * s)
+        if click_zone(win, cx, cy, cell, cell):
+            app.toast_for("post detail view arrives in a later build", 2.0)
         shown = shown + 1
-    if shown == 0:
-        gui.text(win, x0, y + 20.0, "no posts yet", t.text_dim, 14)
+    if shown == 0 and app.profile_error == "":
+        gui.text(win, x0, y + 20.0 * s, "no posts yet", t.text_dim, 14.0 * s)
+    if app.profile_error != "" and app.profile_error[0:8] != "loading:":
+        gui.text(win, x0, y + 20.0 * s, "profile failed: {app.profile_error}", t.like, 13.0 * s)
     return app
 
-func find_user(app: App, username: str) -> User:
+func lookup_user(app: App, username: str) -> User:
+    if app.me.username == username and app.me.id != "":
+        return app.me
     for u in app.users:
         if u.username == username:
             return u
-    if app.me.username == username:
-        return app.me
+    for u in app.profile_posts:
+        if u.user.username == username:
+            return u.user
     return User("", "", "", "initials", "", "", 0, 0, false, false)
-
-func count_posts_of(app: App, u: User) -> int:
-    n = 0
-    for p in app.posts:
-        if p.user.id == u.id:
-            n = n + 1
-    return n

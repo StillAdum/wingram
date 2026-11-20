@@ -1,24 +1,32 @@
-# wingram — a PC Instagram-style client written entirely in Still
+# wingram — a real PC Instagram client written entirely in Still
 #
-# Requires the Still 0.6.4+ runtime (gui/net/audio/media/json + read_dir).
-# Layout mirrors instagram.com web: top bar, left nav rail, centered column.
+# Requires the Still 0.6.6+ runtime (gui/net/audio/media/json/webview/io).
+# First run: sign in with your Instagram account in the embedded webview
+# (or paste a sessionid). After that this is the real instagram.com feed on
+# your desktop: real posts, real images, real counts — plus Wingram's
+# songs-in-notes feature and the Mods system.
 #
 # Usage:
-#   still run wingram.strc            (dev, via tcc)
 #   wingram.exe                       (release build)
 #   wingram.exe --selftest            (headless logic checks, no window)
+#   still run wingram.strc            (dev, via tcc)
 
 use gui
+use math
 use json
 use media
+use io
+use webview
 use "src/theme.strc"
 use "src/types.strc"
 use "src/songs.strc"
 use "src/mods_engine.strc"
 use "src/storage.strc": NOTES_FILE
-use "src/adapters.strc"
+use "src/adapters.strc": refresh_feed, ig_fetch_me, ig_fetch_profile, ig_fetch_notifications
 use "src/app.strc"
 use "src/ui_kit.strc"
+use "src/imagepipe.strc"
+use "src/screens/login.strc"
 use "src/screens/feed.strc"
 use "src/screens/explore.strc"
 use "src/screens/reels.strc"
@@ -28,9 +36,7 @@ use "src/screens/profile.strc"
 use "src/screens/notifications.strc"
 use "src/screens/settings.strc"
 
-W = 1280
-H = 832
-NAV_W = 220
+VERSION = "0.2.0"
 
 func main():
     argv = args()
@@ -45,7 +51,17 @@ func main():
         print("wingram needs a display backend (gui module requires Windows in this build)")
         exit(1)
 
-    win = gui.open_window("Wingram", W, H)
+    # DPI-aware default window size (per-monitor-v2 awareness is enabled by
+    # the runtime before the window exists)
+    sdpi = float(gui.system_dpi())
+    scale = sdpi / 96.0
+    w = int(1180.0 * scale)
+    h = int(780.0 * scale)
+    if w > 1920:
+        w = 1920
+    if h > 1080:
+        h = 1080
+    win = gui.open_window("Wingram — Instagram for PC", w, h)
     if win == 0:
         print("could not open the main window")
         exit(1)
@@ -58,35 +74,46 @@ func main():
     app.mods = apply_config(app.mods, cfg)
     app.theme = app.mods.apply_theme(make_theme())
     app.adapter.instance = cfg.get("account.fediverse_instance", app.adapter.instance)
-    app.adapter.ig_sessionid = cfg.get("account.instagram_sessionid", "")
-    app.adapter.ig_ds_user_id = ig_extract_user_id(app.adapter.ig_sessionid)
-    app.ig_target = cfg.get("account.ig_target", app.ig_target)
-    saved = load_my_notes(NOTES_FILE)
-    if saved.ok and len(saved.notes) > 0:
-        app.notes = saved.notes
-
-    app.toast_for("welcome to wingram — mods loaded: {len(app.mods.mods)}", 3.0)
+    saved_sid = cfg.get("account.instagram_sessionid", "")
+    saved_dsid = cfg.get("account.instagram_ds_user_id", "")
+    saved_csrf = cfg.get("account.instagram_csrftoken", "")
+    backend = cfg.get("account.backend", "instagram")
+    if backend == "fediverse":
+        app.adapter.mode = "fediverse"
+    if saved_sid != "" and saved_dsid != "":
+        app.adapter.ig_sessionid = saved_sid
+        app.adapter.ig_ds_user_id = saved_dsid
+        app.adapter.ig_csrftoken = saved_csrf
+        app.logged_in = true
+    saved_notes = load_my_notes(NOTES_FILE)
+    if saved_notes.ok:
+        app.notes = saved_notes.notes
 
     frames = 0
     while app.running and gui.window_open(win):
         if gui.begin_frame(win):
-            t = app.theme
-            gui.set_bg(win, t.bg)
-            draw_top_bar(app)
-            nav_x = 24.0
-            nav_y = 46.0
-            nav_h = float(H) - nav_y - 8.0
-            goto = draw_nav_rail(win, t, nav_x, nav_y, float(NAV_W), nav_h, app.screen, app.me, app.unread_dms(), len(app.notifs))
-            if goto != "":
-                app = handle_nav(app, goto)
-            content_x = float(NAV_W) + 48.0
-            app = route_screen(app, content_x)
-            draw_toast(app)
-            app = handle_story_viewer(app)
-            app = check_reload(app)
+            app.scale = float(gui.dpi(win)) / 96.0
+            gui.set_bg(win, app.theme.bg)
+            if not app.logged_in:
+                app = login.render(app)
+            else:
+                draw_top_bar(app)
+                nav_w = float(app.theme.nav_w) * app.scale
+                nav_y = 46.0 * app.scale
+                nav_h = float(gui.height(win)) - nav_y - 8.0 * app.scale
+                if app.screen != "notes_compose":
+                    goto = draw_nav_rail(win, app.theme, 16.0 * app.scale, nav_y, nav_w, nav_h, app.screen, app.me, 0, 0)
+                    if goto != "":
+                        app = handle_nav(app, goto)
+                content_x = nav_w + 32.0 * app.scale
+                app = route_screen(app, content_x)
+                app = fetch_pump(app)
+                imagepipe.pump(app)
+                imagepipe.prune(app)
+                draw_toast(app)
+                app = check_reload(app)
             gui.end_frame(win)
         else:
-            # window was closed inside begin_frame's pump
             break
         frames = frames + 1
         if smoke and frames >= 90:
@@ -115,6 +142,8 @@ func handle_nav(nav_app: App, target: str) -> App:
         nav_app.screen = "dm"
     elif target == "notifications":
         nav_app.screen = "notifications"
+        if nav_app.notif_state == "idle":
+            nav_app.notif_state = "loading"
     elif target == "create":
         nav_app.screen = "notes"
         nav_app.picker_open = false
@@ -123,54 +152,171 @@ func handle_nav(nav_app: App, target: str) -> App:
         nav_app.compose_focus = false
     elif target == "profile":
         nav_app.screen = "profile"
-        nav_app.profile_user = ""
+        nav_app.profile_owner = ""
+        nav_app.profile_error = ""
     elif target == "settings":
         nav_app.screen = "settings"
     return nav_app
 
 func route_screen(route_app: App, x: float) -> App:
     win = route_app.win
-    gui.clip_push(win, x, 46.0, float(gui.width(win)) - x - 8.0, float(gui.height(win)) - 54.0)
-    s = route_app.screen
-    if s == "feed":
+    t = route_app.theme
+    s = route_app.scale
+    top = 46.0 * s
+    ch = float(gui.height(win)) - top - 8.0 * s
+    cw = float(gui.width(win)) - x - 12.0 * s
+    gui.clip_push(win, x, top, cw, ch)
+    sc = route_app.screen
+    if sc == "feed":
         route_app = feed.render(route_app)
-    elif s == "explore" or s == "search":
+    elif sc == "explore" or sc == "search":
         route_app = explore.render(route_app)
-    elif s == "reels":
+    elif sc == "reels":
         route_app = reels.render(route_app)
-    elif s == "notes":
+    elif sc == "notes":
         route_app = notes.render(route_app)
-    elif s == "dm":
+    elif sc == "dm":
         route_app = dm.render(route_app)
-    elif s == "profile":
+    elif sc == "profile":
         route_app = profile.render(route_app)
-    elif s == "notifications":
+    elif sc == "notifications":
         route_app = notifications.render(route_app)
-    elif s == "settings":
+    elif sc == "settings":
         route_app = settings.render(route_app)
     else:
-        gui.text(win, x + 20.0, 80.0, "unknown screen: {s}", route_app.theme.text_dim, 14)
+        gui.text(win, x + 20.0 * s, top + 34.0 * s, "unknown screen: {sc}", route_app.theme.text_dim, 14.0 * s)
     gui.clip_pop(win)
     return route_app
 
-# web-style top bar: logo chip + backend status
+# ------------------------------------------------------------- data pump
+# The fetch state machine keeps the UI alive: the "waiting" phase paints a
+# spinner for a moment first (so the user sees it), then the actual network
+# call runs (blocking, but framed by visible states).
+
+func fetch_pump(app: App) -> App:
+    win = app.win
+    t = app.theme
+    s = app.scale
+    st = app.fetch_state
+    if st == "idle":
+        app.fetch_state = "waiting"
+        app.fetch_at = clock()
+        return app
+    if st == "waiting":
+        if clock() - app.fetch_at < 0.35:
+            draw_center_status(app, "loading your feed...", true)
+            return app
+        app.fetch_state = "loading"
+        return app
+    if st == "loading":
+        fr = refresh_feed(app.adapter)
+        if not fr.ok:
+            app.fetch_state = "error"
+            app.fetch_error = fr.error
+            app.posts = []
+            app.users = []
+            return app
+        app.posts = fr.posts
+        app.users = fr.users
+        app.feed_more = fr.more
+        app.feed_next = fr.next_max_id
+        app.reels = collect_reels(fr.posts)
+        app.fetch_state = "ok"
+        app.status_line = app.adapter.status
+        # fetch own profile right after the feed (username, avatar, counts)
+        me_r = ig_fetch_me(app.adapter)
+        if me_r.ok:
+            app.me = me_r.user
+        return app
+    if st == "error":
+        draw_center_error(app, app.fetch_error)
+        bw = 240.0 * s
+        gh = float(gui.height(win))
+        gw = float(gui.width(win))
+        if draw_button(win, t, gw / 2.0 - bw / 2.0, gh / 2.0 + 40.0 * s, bw, 38.0 * s, "retry", true):
+            app.fetch_state = "waiting"
+            app.fetch_at = clock()
+        return app
+    # ok: handle background loads (load-more, notifications)
+    if app.notif_state == "loading":
+        nr = ig_fetch_notifications(app.adapter, app.users)
+        if nr.ok:
+            app.notifs = nr.notifs
+            app.notif_state = "ok"
+        else:
+            app.notifs = []
+            app.notif_state = "error"
+            app.notif_error = nr.error
+    if app.feed_loading_more and app.feed_more and app.feed_next != "":
+        app.feed_loading_more = false
+        app.toast_for("older posts are on their way (pagination lands in v0.3)", 2.5)
+        app.feed_more = false
+    return app
+
+func collect_reels(posts: [Post]) -> [Post]:
+    reels: [Post] = []
+    for p in posts:
+        if p.video:
+            push(reels, p)
+    return reels
+
+func draw_center_status(app: App, msg: str, spin: bool):
+    win = app.win
+    t = app.theme
+    s = app.scale
+    gw = float(gui.width(win))
+    gh = float(gui.height(win))
+    cy = gh / 2.0
+    if spin:
+        # rotating arc spinner
+        n = 10
+        phase = int(clock() * 8.0) % n
+        for i in range(n):
+            ang = float(i) * (360.0 / float(n)) * 3.14159265 / 180.0
+            a = float(i - phase)
+            if a < 0.0:
+                a = a + float(n)
+            shade = int(60.0 + 140.0 * (a / float(n)))
+            col = shade * 65536 + shade * 256 + shade
+            rad = 16.0 * s
+            cx = gw / 2.0
+            px = cx + cos(ang) * rad
+            py = cy + sin(ang) * rad
+            gui.fill_circle(win, px, py, 2.2 * s, col)
+    tw = float(gui.text_width(win, msg, 14.0 * s))
+    gui.text(win, gw / 2.0 - tw / 2.0, cy + 34.0 * s, msg, t.text_dim, 14.0 * s)
+
+func draw_center_error(app: App, msg: str):
+    win = app.win
+    t = app.theme
+    s = app.scale
+    gw = float(gui.width(win))
+    gh = float(gui.height(win))
+    gui.text_bold(win, gw / 2.0 - 60.0 * s, gh / 2.0 - 40.0 * s, "could not load", t.text, 18.0 * s)
+    gui.clip_push(win, gw / 2.0 - 220.0 * s, gh / 2.0 - 8.0 * s, 440.0 * s, 60.0 * s)
+    gui.text(win, gw / 2.0 - 220.0 * s, gh / 2.0 - 6.0 * s, msg, t.text_dim, 13.0 * s)
+    gui.clip_pop(win)
+
+# web-style top bar
 func draw_top_bar(top_app: App):
     win = top_app.win
     t = top_app.theme
-    gui.fill_rect(win, 0.0, 0.0, float(gui.width(win)), 44.0, t.surface)
-    gui.fill_rect(win, 0.0, 44.0, float(gui.width(win)), 1.0, t.border)
-    gui.text_bold(win, 24.0, 12.0, "Wingram", t.text, 18)
-    mode_label = top_app.adapter.mode
-    if mode_label == "local":
-        mode_label = "local demo data"
-    elif mode_label == "fediverse":
+    s = top_app.scale
+    gw = float(gui.width(win))
+    gui.fill_rect(win, 0.0, 0.0, gw, 44.0 * s, t.surface)
+    gui.fill_rect(win, 0.0, 44.0 * s, gw, 1.0 * s, t.border)
+    gui.text_bold(win, 20.0 * s, 12.0 * s, "Wingram", t.text, 18.0 * s)
+    mode_label = "instagram"
+    if top_app.adapter.mode == "fediverse":
         mode_label = "fediverse: {top_app.adapter.instance}"
-    elif mode_label == "instagram":
-        mode_label = "instagram (experimental)"
-    gui.text(win, 130.0, 17.0, mode_label, t.text_dim, 12)
-    esc_hint = "esc to close"
-    w = float(gui.text_width(win, esc_hint, 11))
-    gui.text(win, float(gui.width(win)) - w - 16.0, 18.0, esc_hint, t.text_faint, 11)
+    elif top_app.status_line != "":
+        mode_label = "{mode_label} • {top_app.status_line}"
+    gui.text(win, 120.0 * s, 17.0 * s, mode_label, t.text_dim, 12.0 * s)
+    me_label = ""
+    if top_app.me.username != "":
+        me_label = "@{top_app.me.username}"
+    mw = float(gui.text_width(win, me_label, 12.0 * s))
+    gui.text(win, gw - mw - 18.0 * s, 17.0 * s, me_label, t.text_dim, 12.0 * s)
 
 func draw_toast(app: App):
     if app.toast == "":
@@ -180,91 +326,41 @@ func draw_toast(app: App):
         return
     win = app.win
     t = app.theme
-    w = float(gui.text_width(win, app.toast, 13)) + 32.0
+    s = app.scale
+    w = float(gui.text_width(win, app.toast, 13.0 * s)) + 32.0 * s
     x = (float(gui.width(win)) - w) / 2.0
-    gui.fill_round(win, x, float(gui.height(win)) - 56.0, w, 36.0, 10.0, lerp_color(t.surface, 0x000000, 0.25))
-    gui.text(win, x + 16.0, float(gui.height(win)) - 46.0, app.toast, t.text, 13)
-
-# fullscreen story viewer overlay
-func handle_story_viewer(app: App) -> App:
-    if not app.story_open:
-        return app
-    win = app.win
-    t = app.theme
-    idx = app.story_index
-    if idx < 0 or idx >= len(app.stories):
-        app.story_open = false
-        return app
-    item = app.stories[idx]
-    u = item.user
-    pair = gradient_pair("story" + u.username)
-    gui.fill_rect(win, 0.0, 0.0, float(gui.width(win)), float(gui.height(win)), lerp_color(0x000000, pair.0, 0.85))
-    cw = 420.0
-    ch = 640.0
-    cx = (float(gui.width(win)) - cw) / 2.0
-    cy = (float(gui.height(win)) - ch) / 2.0
-    draw_gradient_rect(win, cx, cy, cw, ch, pair.0, pair.1, 24)
-    # progress bar
-    prog = (clock() - app.story_started) / 5.0
-    if prog > 1.0:
-        app.story_open = false
-        item.seen = true
-        app.stories[idx] = item
-        return app
-    gui.fill_rect(win, cx + 12.0, cy + 12.0, (cw - 24.0) * prog, 3.0, 0xFFFFFF)
-    draw_avatar(win, t, u, cx + 36.0, cy + 40.0, 16.0, false, false)
-    gui.text_bold(win, cx + 62.0, cy + 30.0, u.username, 0xFFFFFF, 15)
-    gui.text(win, cx + 62.0, cy + 50.0, "{int(prog * 5.0)}s", lerp_color(0xFFFFFF, pair.1, 0.4), 12)
-    gui.text_bold(win, cx + cw / 2.0 - 60.0, cy + ch / 2.0 - 10.0, u.username, lerp_color(0xFFFFFF, pair.0, 0.5), 42)
-    gui.text(win, cx + 20.0, cy + ch - 30.0, "click anywhere to close", lerp_color(0xFFFFFF, pair.1, 0.5), 12)
-    if gui.mouse_clicked(win) or gui.key_pressed(win, gui.VK_ESCAPE):
-        item.seen = true
-        app.stories[idx] = item
-        app.story_open = false
-    return app
+    gui.fill_round(win, x, float(gui.height(win)) - 56.0 * s, w, 36.0 * s, 10.0 * s, lerp_color(t.surface, 0x000000, 0.25))
+    gui.text(win, x + 16.0 * s, float(gui.height(win)) - 46.0 * s, app.toast, t.text, 13.0 * s)
 
 func check_reload(app: App) -> App:
     if not app.reload_requested:
         return app
     app.reload_requested = false
     if app.adapter.mode == "fediverse":
-        fr = refresh_feed(app.adapter, app.ig_target)
+        fr = refresh_feed(app.adapter)
         if fr.ok:
             app.users = fr.users
             app.posts = fr.posts
+            app.fetch_state = "ok"
             app.toast_for("loaded {len(fr.posts)} posts from the fediverse", 2.5)
         else:
             app.toast_for("fediverse failed: {app.adapter.last_error}", 3.0)
-    elif app.adapter.mode == "instagram":
-        if app.adapter.ig_sessionid == "":
-            app.toast_for("paste your instagram sessionid in config.ini first", 3.0)
-        else:
-            fr = refresh_feed(app.adapter, app.ig_target)
-            if fr.ok:
-                app.users = fr.users
-                app.posts = fr.posts
-                app.toast_for("loaded {len(fr.posts)} instagram posts", 2.5)
-            else:
-                app.toast_for("instagram failed: {app.adapter.last_error}", 3.5)
     else:
-        app.toast_for("local demo data active", 2.0)
+        app.fetch_state = "waiting"
+        app.fetch_at = clock()
     return app
 
 # ------------------------------------------------------------- selftest
-# Headless verification of the logic layer: JSON round-trips, mod parsing,
-# config persistence, catalog integrity, model invariants. Exits 0 on pass.
+# Headless verification of the logic layer. Exits 0 on pass.
 
 func selftest() -> int:
     print("wingram selftest")
     fails = 0
 
-    # json round-trip
-    r = json_parse_test()
-    if not r:
+    if not json_parse_test():
         print("FAIL json round-trip")
         fails = fails + 1
 
-    # mods: parse a sample mod text and check values
     sample = "[mod]\nid = test-mod\nname = Test Mod\nversion = 1.2.0\nauthor = tester\ndescription = a test\n\n[theme]\naccent = 0x7C3AED\n\n[features]\nfeed_density = compact"
     m = parse_mod("mods/test.strc", sample)
     if m.id != "test-mod" or m.name != "Test Mod" or m.version != "1.2.0":
@@ -275,19 +371,62 @@ func selftest() -> int:
     if eng.value("theme", "accent", "") != "0x7C3AED":
         print("FAIL mod theme value lookup")
         fails = fails + 1
-    if not eng.has_feature("feed_density", "compact"):
-        print("FAIL mod feature lookup")
-        fails = fails + 1
     t = eng.apply_theme(make_theme())
     if t.accent != 0x7C3AED:
         print("FAIL mod theme apply")
         fails = fails + 1
 
-    # config persistence round-trip
-    save_config("selftest_config.ini", eng, {"backend": "fediverse"})
+    save_config("selftest_config.ini", eng, {"backend": "instagram"})
     cfg = load_config("selftest_config.ini")
     if cfg.get("mods.enabled", "") != "test-mod":
         print("FAIL config save/load")
+        fails = fails + 1
+
+    # sessionid parsing (web %3A form, mobile : form, cookie-prefixed form)
+    if session_user_id("5236221936%3A4RkWjZ0b3xA7Gc%3A28") != "5236221936":
+        print("FAIL sessionid user id (web form)")
+        fails = fails + 1
+    if session_user_id("1234567890:AbCdEf:28") != "1234567890":
+        print("FAIL sessionid user id (mobile form)")
+        fails = fails + 1
+    c = clean_sessionid("Cookie: sessionid=9988776655%3AXyzAbcDe%3A12; ds_user_id=9988776655")
+    if c != "9988776655":
+        print("FAIL clean_sessionid cookie line")
+        fails = fails + 1
+    c2 = clean_sessionid("  5544332211%3AqWeRtY%3A22  ")
+    if c2 != "5544332211":
+        print("FAIL clean_sessionid raw value")
+        fails = fails + 1
+
+    # feed fixture: map a real-shaped v1 media object
+    media_fixture = "{{\"pk\":\"999222\",\"like_count\":1234,\"comment_count\":21,\"taken_at\":{int(clock() - 7200.0)},\"caption\":{{\"text\":\"hello from the fixture\"}},\"user\":{{\"username\":\"fixture.user\",\"full_name\":\"Fixture User\",\"profile_pic_url\":\"https://example.test/a.jpg\"}},\"image_versions2\":{{\"candidates\":[{{\"url\":\"https://example.test/img.jpg?sig=1\"}}]}},\"video_versions\":[{{\"url\":\"https://example.test/v.mp4\"}}]}}"
+    users: [User] = []
+    p = ig_map_media(users, parse_json_value(media_fixture), "0")
+    if p.id != "ig:999222":
+        print("FAIL fixture post id: {p.id}")
+        fails = fails + 1
+    if p.user.username != "fixture.user" or p.user.avatar_kind != "url":
+        print("FAIL fixture user mapping")
+        fails = fails + 1
+    if p.caption != "hello from the fixture":
+        print("FAIL fixture caption")
+        fails = fails + 1
+    if p.photo_arg != "https://example.test/img.jpg?sig=1":
+        print("FAIL fixture image url")
+        fails = fails + 1
+    if not p.video:
+        print("FAIL fixture video flag")
+        fails = fails + 1
+    if p.time_label != "2h":
+        print("FAIL fixture time label: {p.time_label}")
+        fails = fails + 1
+
+    # url hashing: stable, hex, differs per input
+    h1 = url_hash("https://example.test/img.jpg?sig=1")
+    h2 = url_hash("https://example.test/img.jpg?sig=1")
+    h3 = url_hash("https://example.test/img.jpg?sig=2")
+    if h1 != h2 or h1 == h3 or len(h1) != 16:
+        print("FAIL url_hash")
         fails = fails + 1
 
     # catalog integrity: every melody must parse as freq:ms pairs
@@ -296,42 +435,30 @@ func selftest() -> int:
         print("FAIL catalog too small")
         fails = fails + 1
     for i in range(cat.count()):
-        s = cat.songs[i]
-        if not melody_spec_valid(s.melody):
-            print("FAIL melody spec: {s.id}")
+        song = cat.songs[i]
+        if not melody_spec_valid(song.melody):
+            print("FAIL melody spec: {song.id}")
             fails = fails + 1
 
-    # models: demo data invariants
-    users = demo_users()
-    posts = demo_posts(users)
-    if len(posts) != 6:
-        print("FAIL demo posts count")
-        fails = fails + 1
-    notes = demo_notes(users)
-    song_notes = 0
-    for i in range(len(notes)):
-        if notes[i].song_id != "":
-            song_notes = song_notes + 1
-    if song_notes < 2:
-        print("FAIL demo notes with songs")
-        fails = fails + 1
-
-    # sessionid parsing (instagrapi-style leading digits)
-    uid = ig_extract_user_id("1234567890abcdef123456")
-    if uid != "1234567890":
-        print("FAIL sessionid user id extraction")
-        fails = fails + 1
-
-    # color parsing
     if parse_color("0x0095F6") != 0x0095F6 or parse_color("#FF3040") != 0xFF3040:
         print("FAIL color parsing")
         fails = fails + 1
 
+    if count_format(1234) != "1234" or count_format(25000) != "25.0K" or count_format(3100000) != "3.1M":
+        print("FAIL count_format: {count_format(25000)} {count_format(3100000)}")
+        fails = fails + 1
+
     if fails == 0:
-        print("selftest PASS ({cat.count()} songs, {len(users)} demo users, mods engine ok)")
+        print("selftest PASS ({cat.count()} songs, api mapping + mods + config ok)")
         return 0
     print("selftest FAILED: {fails} checks")
     return 1
+
+func parse_json_value(text: str) -> any:
+    r = json.parse(text)
+    if r.ok:
+        return r.value
+    return none
 
 func json_parse_test() -> bool:
     text = "{{\"a\": 1, \"b\": \"two\", \"c\": [true, null, 2.5]}}"

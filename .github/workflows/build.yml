@@ -47,11 +47,21 @@ jobs:
         shell: pwsh
         run: still build wingram.strc -o wingram.exe --release
 
+      - name: Fetch WebView2Loader.dll (webview login support)
+        shell: pwsh
+        run: |
+          $ver = "1.0.2903.40"
+          $pkg = "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/$ver/microsoft.web.webview2.$ver.nupkg"
+          Invoke-WebRequest -Uri $pkg -OutFile wv2.nupkg
+          Expand-Archive wv2.nupkg -DestinationPath wv2
+          Copy-Item "wv2\runtimes\win-x64\native\WebView2Loader.dll" .
+          Get-Item WebView2Loader.dll | Select-Object Name, Length
+
       - name: Headless selftest
         shell: pwsh
         run: ./wingram.exe --selftest
 
-      - name: GUI smoke test (opens a real window, renders 90 frames)
+      - name: GUI smoke test (opens the login window, renders 90 frames)
         shell: pwsh
         run: |
           $p = Start-Process -FilePath ".\wingram.exe" -ArgumentList "--smoke" -PassThru -NoNewWindow
@@ -59,21 +69,40 @@ jobs:
           Write-Host "smoke exit code: $($p.ExitCode)"
           exit $p.ExitCode
 
+      - name: Package release zip (exe + loader)
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          Compress-Archive -Path wingram.exe, WebView2Loader.dll -DestinationPath "wingram-${{ github.ref_name }}-windows-x64.zip"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: wingram-windows-x64
-          path: wingram.exe
+          path: |
+            wingram.exe
+            WebView2Loader.dll
           if-no-files-found: error
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: wingram.exe
+          files: |
+            wingram.exe
+            WebView2Loader.dll
+            wingram-${{ github.ref_name }}-windows-x64.zip
           body: |
-            Wingram build for ${{ github.ref_name }}.
-            Compiled with Still ${{ steps.still.outputs.tag }} (windows-x64, portable tcc).
+            Wingram ${{ github.ref_name }} — a real PC Instagram client written in Still.
 
-            Run wingram.exe — on first launch Windows SmartScreen may warn
-            (unsigned binary); choose More info -> Run anyway.
+            **Download the zip** (wingram-exe + WebView2Loader.dll together —
+            the login webview needs the loader next to the exe, so keep them
+            in the same folder).
+
+            First run: "Log in with Instagram" opens a real Instagram login
+            in an embedded Edge window; sign in once (2FA works) and the app
+            takes over with your actual feed. No WebView2 on the machine?
+            Use the sessionid fallback on the login screen.
+
+            Windows SmartScreen may warn on first launch (unsigned binary);
+            choose More info -> Run anyway.

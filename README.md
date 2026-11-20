@@ -1,70 +1,64 @@
 # Wingram
 
-**A PC Instagram-style client written entirely in [Still](https://github.com/StillAdum/Still)** — no Electron, no Tauri, no web views. The whole app is Still source (`.strc`) compiled to native Windows code through Still's C emitter.
+**A real PC Instagram client written entirely in [Still](https://github.com/StillAdum/Still)** — no Electron, no Tauri, no HTML. The whole app is Still source (`.strc`) compiled to native Windows code through Still's C emitter. The one exception is the login: an embedded Edge (WebView2) window that signs you in to Instagram for real, so the feed behind it is **your actual feed**.
 
 ![Wingram](assets/banner.png)
 
 ## What it is
 
-Wingram looks and feels like instagram.com (dark web layout: top bar, left
-nav rail, centered feed column) and implements the mobile-exclusive features
-the web client never got — **notes with songs** front and center — plus a
-full **Mods** system driven by plain-text `.strc` files.
+Wingram looks like instagram.com (dark web layout: top bar, left nav rail,
+centered feed column) and implements the mobile-exclusive features the web
+client never got — **notes with songs** front and center — plus a full
+**Mods** system driven by plain-text `.strc` files.
 
-### Features
+### Features (v0.2 — all real data)
 
 | Area | What you get |
 | --- | --- |
-| **Feed** | Post cards with likes/save/caption, gradient artwork (or real JPEGs dropped into `assets/`), stories tray, notes tray |
+| **Login** | Embedded WebView2 window on instagram.com/accounts/login — sign in once (2FA/checkpoints work), the app captures `sessionid`/`ds_user_id` automatically. Session persists in `config.ini`. Fallback: paste the sessionid cookie |
+| **Feed** | Your real Instagram timeline: real post images (progressively downloaded to an on-disk cache), real like/comment counts, captions, timestamps; video posts marked with a play badge |
 | **Notes + songs** | Compose 60-char notes like mobile, attach a song from a searchable picker, hear a **synthesized audio preview**, see the music sticker on the feed tray; notes persist in `wingram_notes.json` |
-| **Reels** | Vertical reel viewer with side actions and song stickers |
-| **Explore** | Search box + photo grid with hover stats |
-| **Messages** | Inbox + thread view with send box |
-| **Profile** | Header with stats, bio, post grid |
-| **Notifications** | Activity list (likes/comments/follows/mentions) |
-| **Settings → Mods** | List `<modname>.strc` files, toggle them live, hot-reload, persisted in `config.ini` |
-| **Backends** | local demo data (offline) • **fediverse live timelines** (real data via Mastodon/Pixelfed public API) • **instagram (experimental)** |
+| **Profile** | Real header (avatar, bio, follower/following counts) for you and anyone you tap; recent-post grid |
+| **Search** | Real user search via the same topsearch endpoint instagram.com uses |
+| **Notifications** | Real activity inbox (likes/comments/follows), best-effort |
+| **Reels** | Video posts from your timeline with poster frames + permalinks |
+| **Messages** | Honest placeholder — Instagram's DM endpoints are GraphQL-only; no fake chats |
+| **Settings → Mods** | List `<modname>.strc` files, toggle them live, hot-reload, persisted in `config.ini`; log out |
+| **Backends** | **instagram** (default, sessionid web API) • fediverse live timelines (Mastodon/Pixelfed) |
 
 ### Songs in notes — how it works on PC
 
-The mobile app lets you attach a 30-second song sticker to a note. Wingram
-does the same on desktop: the composer has a **pick a song** button that
-opens a searchable catalog (title, artist, duration), every song carries an
-original melody spec (`"freq:ms,..."`), and previews are **synthesized at
-runtime** into a WAV in memory and played through winmm — no audio assets,
-works on every machine. The sticker renders on the feed's notes tray exactly
-like mobile, and clicking a sticker plays/stops that song.
+The mobile app lets you attach a song sticker to a note. Wingram does the
+same on desktop: the composer has a **pick a song** button that opens a
+searchable catalog, every song carries an original melody spec
+(`"freq:ms,..."`), and previews are **synthesized at runtime** into a WAV in
+memory and played through winmm — no audio assets, works on every machine.
 
-## Backends (read this)
+## The login, step by step
 
-Instagram shut down the Basic Display API in December 2024 and offers no
-official API for third-party clients, so Wingram ships three data sources:
+1. Download the release **zip** (keep `wingram.exe` and `WebView2Loader.dll`
+   together — the login webview loads the loader DLL from its own folder).
+2. Run `wingram.exe`. The login card appears.
+3. Click **Log in with Instagram** — an embedded Edge window opens on
+   instagram.com/accounts/login. Sign in normally (2FA and "remember me"
+   work). The runtime polls the browser's cookies in the background; the
+   moment `sessionid` + `ds_user_id` exist, the window closes itself.
+4. Your real feed loads. Next launch skips straight to it.
+5. No WebView2 on the machine? The login card shows a **sessionid paste**
+   fallback instead (devtools → Application → Cookies → `sessionid`).
 
-1. **local demo** (default) — a bundled dataset so every screen works offline.
-2. **fediverse** — REAL live data: public timelines from open Mastodon /
-   Pixelfed instances via the documented `/api/v1/timelines/public`
-   endpoint. Configure the instance in Settings → Account. No login needed
-   on open instances; paste an access token for locked-down ones.
-3. **instagram (experimental, opt-in)** — talks to Instagram's private
-   mobile API (`i.instagram.com/api/v1`) the same way
-   [instagrapi](https://github.com/subzeroid/instagrapi) does: paste the
-   `sessionid` cookie from a logged-in browser into `config.ini`
-   (`account.instagram_sessionid = ...`) and set
-   `account.ig_target = <username>`; the client derives `ds_user_id` from
-   the sessionid's leading digits and presents the cookie + Android app
-   headers on each request.
-
-   **This violates Instagram's Terms of Service.** It can rate-limit,
-   challenge, or ban your account, and endpoints drift without notice.
-   It is read-mostly by design (profile + posts). Use an account you can
-   afford to lose.
+**Unofficial-client warning:** Instagram offers no third-party API (the
+Basic Display API shut down in December 2024). Wingram talks to the same
+web API endpoints your browser does, with your session cookie. That is the
+same category of client as every other sessionid-based Instagram app: it
+violates Instagram's ToS, heavy automated use can get an account
+rate-limited, and endpoints can drift without notice. It is read-mostly by
+design (feed, profiles, search, notifications). Use an account you can
+afford to risk.
 
 ## Build
 
-Wingram needs the **Still 0.6.4+** compiler (its `net`, `gui`, `audio`,
-`media`, `json` stdlib modules and `read_dir`/`file_exists`/`dict_key_at`
-builtins are what Wingram is built on; 0.6.4 fixes three code-generation
-bugs that crashed GUI programs — always build Wingram with 0.6.4+):
+Wingram needs the **Still 0.6.7+** compiler (gui/net/audio/media/json/webview/io stdlib modules; 0.6.5 added the WebView2 login backend, per-monitor DPI and windows-subsystem builds; 0.6.6 added `io.make_dir`):
 
 ```powershell
 # get the compiler (Windows x64)
@@ -72,6 +66,7 @@ bugs that crashed GUI programs — always build Wingram with 0.6.4+):
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 still setup-cc          # portable TinyCC, one time
 
+still check wingram.strc            # typecheck
 still run wingram.strc              # dev run
 still build wingram.strc -o wingram.exe --release
 .\wingram.exe                       # the client
@@ -79,7 +74,8 @@ still build wingram.strc -o wingram.exe --release
 ```
 
 GitHub Actions does all of this automatically on every push — see
-`.github/workflows/build.yml` — and attaches `wingram.exe` to every `v*` tag.
+`.github/workflows/build.yml` — and attaches `wingram.exe`,
+`WebView2Loader.dll` and a ready-to-run zip to every `v*` tag.
 
 ## Mods
 
@@ -107,36 +103,46 @@ feed_density = compact
 ## Project layout
 
 ```
-wingram.strc              entry point: window, frame loop, router, selftest
+wingram.strc              entry point: window, frame loop, router, data pump, selftest
 src/
   theme.strc              palette + color parsing
-  types.strc              data models (User/Post/Story/Note/Reel/Chat/...) + demo data
+  types.strc              data models (User/Post/Note/Notif/...) + time/session helpers
   app.strc                the App state struct every screen renders from
-  ui_kit.strc             widgets: avatars, buttons, icons, nav rail, toggles
+  ui_kit.strc             widgets: buttons, inputs, icons, nav rail, toggles
+  imagepipe.strc          progressive image downloads (cache/ + per-frame queue)
   songs.strc              song catalog + melody specs + preview playback
   mods_engine.strc        .strc mod scanning/parsing/applying + config.ini
   storage.strc            notes persistence (JSON) + HTML stripping
-  adapters.strc           local / fediverse / instagram backends
-  screens/                feed, explore, reels, notes, dm, profile, notifications, settings
-.github/workflows/        CI: typecheck → build → selftest → artifact/release
+  adapters.strc           instagram web API client + fediverse backend
+  screens/                login, feed, explore, reels, notes, dm, profile, notifications, settings
+.github/workflows/        CI: typecheck → build → selftest → smoke → artifact/release
 ```
 
 ## Changelog
 
+- **v0.2.0** — the "actually functioning app" release. Real Instagram login
+  through an embedded WebView2 window (cookie capture included), the real
+  home timeline with real images/counts, real profiles, real search, real
+  notifications; per-monitor-v2 DPI scaling everywhere (crisp at 125/150%,
+  layouts recompute from the live client size); windows are resizable and
+  maximizable again; no terminal window behind the exe (windows-subsystem
+  build); demo mode removed — every pixel of content comes from your
+  account or the fediverse.
 - **v0.1.2** — fix the crash-on-launch white-window bug (root cause was in
   the Still 0.6.3 compiler: `d.get(key, x.f)` with a field fallback could
   free the fallback before storing it; rebuilt against Still 0.6.4). CI now
   also opens a real window for 90 frames (`--smoke`) so GUI regressions
   fail the build. Fixes corrupted `[mod]` markers in docs and sample mods.
 - **v0.1.1** — release packaging fixes (source zip, release notes).
-- **v0.1.0** — first public version: feed, stories, reels, explore, DMs,
-  profile, notifications, settings, Mods system, songs in notes.
+- **v0.1.0** — first public version.
 
 ## Screenshots
 
 Run it — or check the releases. The UI is fully drawn each frame with GDI
-(rects, rounded rects, circles, text) through Still's `gui` module; there is
-not a single line of HTML or JavaScript in this repository.
+(rects, rounded rects, circles, text) through Still's `gui` module; post
+images and avatars go through GDI+. There is not a single line of HTML or
+JavaScript in this repository — the login window is the OS webview, the app
+itself is 100% Still.
 
 ## License
 

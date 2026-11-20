@@ -1,118 +1,37 @@
-# screen_dm — direct messages: conversation list + thread view
+# screen_dm — direct messages
+#
+# Honest state: Instagram's DM endpoints are GraphQL-only and need more
+# than a session cookie to call reliably, so this build does not fake a
+# chat. The screen explains that and links to the web inbox instead of
+# showing invented conversations.
 
 use gui
 use "src/theme.strc"
-use "src/types.strc": User, Chat, ChatMsg
 use "src/ui_kit.strc"
 use "src/app.strc"
-use "src/adapters.strc"
 
 func render(app: App) -> App:
     win = app.win
     t = app.theme
-    x0 = 24.0
-    y = 20.0
-    if app.chat_index >= len(app.chats):
-        app.chat_index = 0
-    # list / thread layout like the web client: 350px inbox, rest thread
-    inbox_w = 340.0
-    gui.text_bold(win, x0, y, "Messages", t.text, 22)
-    render_inbox(app, x0, y + 42.0, inbox_w, 560.0)
-    if len(app.chats) > 0:
-        render_thread(app, x0 + inbox_w + 20.0, y + 8.0)
-    else:
-        gui.text(win, x0 + inbox_w + 30.0, y + 60.0, "no conversations", t.text_dim, 14)
-    return app
+    s = app.scale
+    gw = float(gui.width(win))
+    gh = float(gui.height(win))
+    cx = gw / 2.0
+    cy = gh / 2.0 - 40.0 * s
 
-func render_inbox(app: App, x: float, y: float, w: float, h: float) -> App:
-    win = app.win
-    t = app.theme
-    gui.fill_round(win, x, y, w, h, 10.0, t.surface)
-    row_h = 62.0
-    offset = float(app.scroll_of("inbox"))
-    n = len(app.chats)
-    wheel = gui.wheel_delta(win)
-    if wheel != 0:
-        offset = offset - float(wheel)
-    content = float(n) * row_h
-    if offset < 0.0:
-        offset = 0.0
-    if offset + h > content:
-        offset = content - h
-    if offset < 0.0:
-        offset = 0.0
-    app.set_scroll("inbox", int(offset))
-    gui.clip_push(win, x, y, w, h)
-    for i in range(n):
-        c = app.chats[i]
-        rowy = y - offset + float(i) * row_h
-        if rowy + row_h < y or rowy > y + h:
-            continue
-        selected = i == app.chat_index
-        if selected:
-            gui.fill_round(win, x + 6.0, rowy + 3.0, w - 12.0, row_h - 6.0, 8.0, t.accent_soft)
-        elif hovered(win, x + 6.0, rowy + 3.0, w - 12.0, row_h - 6.0):
-            gui.fill_round(win, x + 6.0, rowy + 3.0, w - 12.0, row_h - 6.0, 8.0, t.surface2)
-        draw_avatar(win, t, c.user, x + 36.0, rowy + 30.0, 16.0, false, false)
-        last = "say hi"
-        if len(c.messages) > 0:
-            last = c.messages[len(c.messages) - 1].text
-        draw_username(win, t, c.user, x + 62.0, rowy + 12.0, 13)
-        gui.clip_push(win, x + 60.0, rowy + 32.0, w - 90.0, 18.0)
-        gui.text(win, x + 62.0, rowy + 32.0, last, t.text_dim, 12)
-        gui.clip_pop(win)
-        if c.unread > 0:
-            draw_badge(win, t, x + w - 30.0, rowy + 18.0, "{c.unread}")
-        if click_zone(win, x + 6.0, rowy, w - 12.0, row_h):
-            app.chat_index = i
-            app.chats[i].unread = 0
-    gui.clip_pop(win)
-    return app
-
-func render_thread(app: App, x: float, y: float) -> App:
-    win = app.win
-    t = app.theme
-    c = app.chats[app.chat_index]
-    w = float(gui.width(win)) - x - 24.0
-    h = 600.0
-    gui.fill_round(win, x, y, w, h, 10.0, t.surface)
-    # header
-    draw_avatar(win, t, c.user, x + 28.0, y + 30.0, 16.0, false, false)
-    draw_username(win, t, c.user, x + 54.0, y + 20.0, 15)
-    gui.text(win, x + 54.0, y + 40.0, "active now", t.online, 11)
-    # messages
-    gui.clip_push(win, x + 10.0, y + 58.0, w - 20.0, h - 120.0)
-    my = y + 70.0
-    for i in range(len(c.messages)):
-        m = c.messages[i]
-        bw = float(len(m.text)) * 7.5 + 28.0
-        if bw > w - 140.0:
-            bw = w - 140.0
-        if m.from_me:
-            bx = x + w - 20.0 - bw
-            gui.fill_round(win, bx, my, bw, 34.0, 17.0, t.accent)
-            gui.text(win, bx + 14.0, my + 9.0, m.text, 0xFFFFFF, 13)
-        else:
-            bx = x + 20.0
-            gui.fill_round(win, bx, my, bw, 34.0, 17.0, t.surface2)
-            gui.text(win, bx + 14.0, my + 9.0, m.text, t.text, 13)
-        my = my + 42.0
-    gui.clip_pop(win)
-    # composer
-    iy = y + h - 52.0
-    buf, f = text_input_box(win, t, x + 14.0, iy, w - 130.0, 40.0, app.dm_text, app.dm_focus, "message...")
-    if f and not app.dm_focus:
-        app.dm_focus = true
-    if not f and app.dm_focus and gui.mouse_clicked(win):
-        app.dm_focus = false
-    app.dm_text = apply_typed(win, buf, app.dm_focus)
-    if draw_button(win, t, x + w - 104.0, iy, 90.0, 40.0, "send", true):
-        text = app.dm_text.trim()
-        if text != "":
-            mid = "m{int(clock() * 1000.0)}"
-            push(c.messages, ChatMsg(mid, true, text, "now"))
-            app.dm_text = ""
-            app.dm_focus = false
-            # auto-reply so the thread feels alive (local demo behavior)
-            push(c.messages, ChatMsg("r{mid}", false, "(demo) got it — sent from Wingram", "now"))
+    gui.fill_round(win, cx - 200.0 * s, cy - 120.0 * s, 400.0 * s, 240.0 * s, 14.0 * s, t.surface)
+    gui.fill_round(win, cx - 200.0 * s, cy - 120.0 * s, 400.0 * s, 4.0 * s, 2.0 * s, t.accent)
+    gui.text_bold(win, cx - 160.0 * s, cy - 84.0 * s, "Direct messages", t.text, 20.0 * s)
+    lines = [
+        "DMs need Instagram's GraphQL endpoints, which this build",
+        "does not implement yet — and fake chats would be worse than",
+        "none. Your real inbox is one click away meanwhile:"
+    ]
+    ly = cy - 48.0 * s
+    for i in range(len(lines)):
+        gui.text(win, cx - 160.0 * s, ly + float(i) * 22.0 * s, lines[i], t.text_dim, 13.0 * s)
+    ly = ly + 78.0 * s
+    if draw_button(win, t, cx - 160.0 * s, ly, 200.0 * s, 36.0 * s, "open instagram.com/direct", true):
+        app.toast_for("open https://www.instagram.com/direct in your browser", 3.5)
+    gui.text(win, cx - 160.0 * s, ly + 48.0 * s, "(copy it from the toast, or your browser's address bar)", t.text_faint, 11.0 * s)
     return app

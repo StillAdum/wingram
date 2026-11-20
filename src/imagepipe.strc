@@ -1,0 +1,168 @@
+# imagepipe — progressive image loading for remote posts and avatars
+#
+# Real Instagram posts are served from signed CDN URLs. This module turns a
+# URL into pixels without ever freezing the UI for more than ~one request
+# per frame:
+#   1. draw() checks the on-disk cache (cache/img/<fnv1a>.jpg)
+#   2. if the file is not there yet, the URL joins the per-frame queue and a
+#      shimmer placeholder is drawn in the meantime
+#   3. pump() (called once per frame by the main loop) downloads ONE queued
+#      image with net.download_to — binary-safe, straight to disk
+#   4. the next frame media.load() picks it up and it is drawn for good
+# Failed downloads are remembered so we never retry-storm a dead URL.
+
+use gui
+use media
+use net
+use io
+use "src/theme.strc"
+use "src/types.strc"
+use "src/ui_kit.strc": draw_gradient_rect, gradient_pair, lerp_color, seed_hash
+use "src/app.strc": App
+use "src/adapters.strc": ig_image_headers
+
+IMG_DIR = "cache/img"
+
+# two independent 32-bit fnv1a hashes over the URL, rendered as 16 hex
+# digits (Still ints are i64, so we stay inside 32-bit math per step)
+func url_hash(u: str) -> str:
+    h1 = 2166136261
+    h2 = 3920664437
+    for i in range(len(u)):
+        c = ord(u[i])
+        h1 = ((h1 ^ c) * 16777619) % 4294967296
+        h2 = ((h2 ^ c) * 2166136261) % 4294967296
+    digits = "0123456789abcdef"
+    out = ""
+    v = h1
+    for k in range(8):
+        out = digits[v % 16] + out
+        v = int(v / 16)
+    v = h2
+    for k in range(8):
+        out = digits[v % 16] + out
+        v = int(v / 16)
+    return out
+
+func cache_path(u: str) -> str:
+    return "{IMG_DIR}/{url_hash(u)}.jpg"
+
+func cache_ready() -> bool:
+    if file_exists(IMG_DIR):
+        return true
+    return io.make_dir(IMG_DIR)
+
+# make sure an image will eventually appear; safe to call every frame
+func request(app: App, u: str):
+    if u == "":
+        return
+    path = cache_path(u)
+    if app.img_fail.get(path, false):
+        return
+    if path in app.img_cache:
+        return
+    if app.img_queued.get(path, false):
+        return
+    app.img_queued[path] = true
+    push(app.img_queue, u)
+
+# one queued download per call; returns true while work remains
+func pump(app: App) -> bool:
+    if len(app.img_queue) == 0:
+        return false
+    if not cache_ready():
+        app.img_queue = []
+        app.img_queued = {}
+        return false
+    url = app.img_queue[0]
+    rest: [str] = []
+    for i in range(1, len(app.img_queue)):
+        push(rest, app.img_queue[i])
+    app.img_queue = rest
+    path = cache_path(url)
+    app.img_queued[path] = false
+    ok, st = net.download_to(url, ig_image_headers(), path, 20000)
+    if not ok or st != 200:
+        app.img_fail[path] = true
+    return len(app.img_queue) > 0
+
+# internal: get a loaded image handle for a URL (0 = not ready)
+func handle_for(app: App, u: str) -> int:
+    if u == "":
+        return 0
+    path = cache_path(u)
+    if not file_exists(path):
+        return 0
+    if path in app.img_cache:
+        return app.img_cache.get(path, 0)
+    img = media.load(path)
+    app.img_cache[path] = img
+    if img == 0:
+        # unreadable/corrupt file: never retry it
+        app.img_fail[path] = true
+    return img
+
+# keep the handle cache from growing without bound
+func prune(app: App):
+    if len(app.img_cache) < 160:
+        return
+    ks = []
+    for k in app.img_cache:
+        push(ks, k)
+    for k in ks:
+        img = app.img_cache.get(k, 0)
+        if img != 0:
+            media.free(img)
+    app.img_cache = {}
+
+# draw a post image (shimmer placeholder + request while loading)
+func draw(app: App, u: str, x: float, y: float, w: float, h: float):
+    img = handle_for(app, u)
+    if img != 0:
+        gui.draw_image(app.win, img, x, y, w, h)
+        return
+    request(app, u)
+    placeholder(app, u, x, y, w, h)
+
+# square avatar with URL support; falls back to the initials circle
+func draw_avatar(app: App, u: User, cx: float, cy: float, rad: float, story_ring: bool, seen: bool):
+    win = app.win
+    t = app.theme
+    if story_ring:
+        ring_col = t.accent
+        if seen:
+            ring_col = t.border
+        gui.stroke_circle(win, cx, cy, rad + 3.0 * app.scale, 2.0 * app.scale, ring_col)
+    if u.avatar_kind == "url" and u.avatar_url != "":
+        img = handle_for(app, u.avatar_url)
+        if img != 0:
+            gui.clip_push(win, cx - rad, cy - rad, rad * 2.0, rad * 2.0)
+            gui.draw_image(win, img, cx - rad, cy - rad, rad * 2.0, rad * 2.0)
+            gui.clip_pop(win)
+            return
+        request(app, u.avatar_url)
+    pair = gradient_pair(u.avatar_arg)
+    gui.fill_circle(win, cx, cy, rad, pair[0])
+    ini = u.initials()
+    if ini != "":
+        size = rad * 0.9
+        tw = gui.text_width(win, ini, size)
+        gui.text_bold(win, cx - float(tw) / 2.0, cy - size / 2.0 - 2.0 * app.scale, ini, 0xFFFFFF, size)
+
+func placeholder(app: App, seed: str, x: float, y: float, w: float, h: float):
+    win = app.win
+    t = app.theme
+    pair = gradient_pair(seed)
+    base = lerp_color(t.surface2, pair[0], 0.18)
+    gui.fill_rect(win, x, y, w, h, base)
+    # moving shimmer band
+    phase = (clock() * 0.4) % 1.0
+    band_w = w * 0.25
+    bx = x + (w + band_w) * phase - band_w
+    gui.clip_push(win, x, y, w, h)
+    steps = 8
+    for i in range(steps):
+        f = float(i) / float(steps - 1)
+        c = lerp_color(base, lerp_color(t.surface2, 0xFFFFFF, 0.10), abs(0.5 - f) * 2.0)
+        gui.fill_rect(win, bx + f * band_w, y, band_w / float(steps) + 1.0, h, c)
+    gui.clip_pop(win)

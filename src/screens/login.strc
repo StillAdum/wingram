@@ -1,0 +1,146 @@
+# screen_login — the first-run gate: sign in to Instagram for real
+#
+# Two ways in:
+#   1. "Log in with Instagram" opens an embedded Edge (WebView2) window on
+#      instagram.com/accounts/login. You sign in normally (2FA and
+#      checkpoints work), and the runtime polls the site's cookies; the
+#      moment sessionid + ds_user_id exist the window closes itself.
+#   2. Fallback if WebView2 is unavailable: paste the sessionid cookie from
+#      your browser's devtools and press Sign in.
+# Both paths end with the same thing: the session stored in config.ini and
+# the real feed loading behind it.
+
+use gui
+use webview
+use "src/theme.strc"
+use "src/types.strc": clean_sessionid, session_user_id
+use "src/ui_kit.strc"
+use "src/app.strc"
+use "src/adapters.strc": Adapter
+
+func render(app: App) -> App:
+    win = app.win
+    t = app.theme
+    s = app.scale
+    gw = float(gui.width(win))
+    gh = float(gui.height(win))
+
+    # soft gradient backdrop like the instagram login card
+    gui.fill_rect(win, 0.0, 0.0, gw, gh, t.bg)
+    pair = gradient_pair("wingram-login")
+    draw_gradient_rect(win, 0.0, 0.0, gw, 3.0, pair[0], pair[1], 24)
+
+    cw = 380.0 * s
+    ch = 460.0 * s
+    cx = (gw - cw) / 2.0
+    cy = (gh - ch) / 2.0
+    gui.fill_round(win, cx, cy, cw, ch, 14.0 * s, t.surface)
+    gui.fill_round(win, cx, cy, cw, 4.0 * s, 2.0 * s, t.accent)
+
+    x = cx + 36.0 * s
+    y = cy + 34.0 * s
+    gui.text_bold(win, x, y, "Wingram", t.text, 34.0 * s)
+    y = y + 44.0 * s
+    gui.text(win, x, y, "Instagram for PC — real feed, notes with songs,", t.text_dim, 13.0 * s)
+    y = y + 20.0 * s
+    gui.text(win, x, y, "mods. Sign in with your Instagram account.", t.text_dim, 13.0 * s)
+    y = y + 40.0 * s
+
+    # primary: webview login
+    bw = cw - 72.0 * s
+    if draw_button(win, t, x, y, bw, 44.0 * s, "Log in with Instagram", true):
+        if not app.login_busy:
+            app = start_webview_login(app)
+    y = y + 52.0 * s
+
+    if webview.available():
+        gui.text(win, x, y, "Opens a real Instagram login in an embedded browser.", t.text_faint, 12.0 * s)
+        ver = webview.runtime_version()
+        if ver != "":
+            gui.text(win, x, y + 18.0 * s, "webview runtime: {ver}", t.text_faint, 11.0 * s)
+    else:
+        gui.text(win, x, y, "webview unavailable: {webview.last_error()}", t.like, 12.0 * s)
+        gui.text(win, x, y + 18.0 * s, "use the sessionid fallback below instead.", t.text_faint, 12.0 * s)
+    y = y + 52.0 * s
+
+    # divider
+    gui.fill_rect(win, x, y + 8.0 * s, bw, 1.0, t.border)
+    gui.text(win, cx + cw / 2.0 - 14.0 * s, y, "or", t.text_faint, 12.0 * s)
+    y = y + 24.0 * s
+
+    gui.text(win, x, y, "Paste your sessionid cookie (advanced)", t.text_dim, 13.0 * s)
+    y = y + 24.0 * s
+    buf, f = text_input_box(win, t, x, y, bw, 34.0 * s, app.login_paste, app.login_paste_focus, "sessionid=...")
+    if app.login_paste_focus:
+        app.login_paste = apply_typed(win, buf, true)
+    elif f:
+        app.login_paste_focus = true
+    y = y + 42.0 * s
+    if draw_button(win, t, x, y, bw, 36.0 * s, "Sign in with sessionid", false):
+        app = try_paste_login(app)
+    y = y + 44.0 * s
+
+    if app.login_error != "":
+        gui.clip_push(win, x, y, bw, 40.0 * s)
+        gui.text(win, x, y, app.login_error, t.like, 12.0 * s)
+        gui.clip_pop(win)
+    elif app.login_hint != "":
+        gui.text(win, x, y, app.login_hint, t.text_faint, 12.0 * s)
+
+    foot = "unofficial client: use an account you can risk. read-mostly."
+    gui.text(win, (gw - float(gui.text_width(win, foot, 11))) / 2.0, gh - 26.0 * s, foot, t.text_faint, 11.0 * s)
+    return app
+
+# open the WebView2 login window and capture the session cookies
+func start_webview_login(app: App) -> App:
+    app.login_busy = true
+    app.login_hint = "waiting for instagram login..."
+    app.login_error = ""
+    code = webview.login("https://www.instagram.com/accounts/login/", "https://www.instagram.com/")
+    app.login_busy = false
+    app.login_hint = ""
+    if code == 1:
+        sid = webview.cookie("sessionid")
+        dsid = webview.cookie("ds_user_id")
+        csrf = webview.cookie("csrftoken")
+        if sid != "" and dsid != "":
+            app = apply_session(app, sid, dsid, csrf)
+        else:
+            app.login_error = "login window closed before cookies appeared — try again"
+    elif code == 2:
+        app.login_error = ""
+    else:
+        app.login_error = "webview login failed: {webview.last_error()}"
+    return app
+
+# paste fallback: sessionid from the browser devtools
+func try_paste_login(app: App) -> App:
+    raw = app.login_paste
+    sid = clean_sessionid(raw)
+    if len(sid) < 20:
+        app.login_error = "that does not look like a sessionid (need ~50+ chars)"
+        return app
+    dsid = session_user_id(sid)
+    if dsid == "":
+        app.login_error = "could not read your user id from the sessionid"
+        return app
+    app.login_paste = ""
+    app.login_paste_focus = false
+    return apply_session(app, sid, dsid, "")
+
+# store the session and kick off the first fetch
+func apply_session(app: App, sid: str, dsid: str, csrf: str) -> App:
+    app.adapter.ig_sessionid = sid
+    app.adapter.ig_ds_user_id = dsid
+    app.adapter.ig_csrftoken = csrf
+    app.adapter.mode = "instagram"
+    app.logged_in = true
+    app.fetch_state = "idle"
+    app.login_error = ""
+    # persist so the next launch skips login
+    app.settings_cfg["account.instagram_sessionid"] = sid
+    app.settings_cfg["account.instagram_ds_user_id"] = dsid
+    app.settings_cfg["account.instagram_csrftoken"] = csrf
+    app.settings_cfg["account.backend"] = "instagram"
+    app.toast_for("signed in — loading your feed", 2.5)
+    return app

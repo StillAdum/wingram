@@ -212,7 +212,7 @@ func save_config(path: str, engine: ModEngine, settings: {str: str}):
     push(lines, "enabled = {ids}")
     push(lines, "")
     push(lines, "[account]")
-    ks = ["backend", "fediverse_instance", "instagram_sessionid", "username"]
+    ks = ["backend", "fediverse_instance", "instagram_sessionid", "instagram_ds_user_id", "instagram_csrftoken", "username"]
     for k in ks:
         v = settings.get(k, "")
         push(lines, "{k} = {v}")

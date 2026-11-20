@@ -1,50 +1,85 @@
-# screen_notifications — activity feed (likes, comments, follows, mentions)
+# screen_notifications — the real Instagram notification inbox
+#
+# Reads /api/v1/news/inbox/ (new_stories + old_stories) with the session
+# cookie, same as the web app's activity feed. When the endpoint answers,
+# rows show the real actor, text and age; when it does not, the screen says
+# so instead of showing fake activity.
 
 use gui
 use "src/theme.strc"
-use "src/types.strc": User, Notif
+use "src/types.strc": Notif, User
 use "src/ui_kit.strc"
+use "src/imagepipe.strc"
 use "src/app.strc"
-use "src/adapters.strc"
 
 func render(app: App) -> App:
     win = app.win
     t = app.theme
-    x0 = 24.0
-    y = 20.0
-    gui.text_bold(win, x0, y, "Notifications", t.text, 24)
-    y = y + 50.0
-    w = 520.0
-    if len(app.notifs) == 0:
-        gui.text(win, x0, y + 10.0, "no notifications", t.text_dim, 14)
+    s = app.scale
+    x0 = 24.0 * s
+    gw = float(gui.width(win))
+    w = gw - x0 - 24.0 * s
+    y = 16.0 * s
+    gui.text_bold(win, x0, y, "Notifications", t.text, 24.0 * s)
+    y = y + 44.0 * s
+
+    if app.notif_state == "loading":
+        gui.text(win, x0, y + 20.0 * s, "loading your activity...", t.text_dim, 14.0 * s)
         return app
-    row_h = 64.0
-    gui.fill_round(win, x0, y, w, float(len(app.notifs)) * row_h + 12.0, 10.0, t.surface)
+    if app.notif_state == "error":
+        gui.text(win, x0, y + 20.0 * s, "could not load notifications: {app.notif_error}", t.like, 13.0 * s)
+        if draw_button(win, t, x0, y + 52.0 * s, 140.0 * s, 34.0 * s, "try again", false):
+            app.notif_state = "loading"
+        return app
+    if len(app.notifs) == 0:
+        gui.text(win, x0, y + 20.0 * s, "no recent activity", t.text_dim, 14.0 * s)
+        return app
+
+    row_h = 60.0 * s
+    gh = float(gui.height(win))
+    offset = float(app.scroll_of("notifs"))
+    content = float(len(app.notifs)) * row_h
+    wheel = gui.wheel_delta(win)
+    if wheel != 0:
+        offset = offset - float(wheel) * 1.2
+    if offset < 0.0:
+        offset = 0.0
+    if offset + (gh - y - 12.0 * s) > content:
+        offset = content - (gh - y - 12.0 * s)
+    if offset < 0.0:
+        offset = 0.0
+    app.set_scroll("notifs", int(offset))
+
+    gui.clip_push(win, x0, y, w, gh - y - 12.0 * s)
     for i in range(len(app.notifs)):
         n = app.notifs[i]
-        rowy = y + 8.0 + float(i) * row_h
-        draw_avatar(win, t, n.user, x0 + 34.0, rowy + 24.0, 16.0, false, false)
-        # action label
-        action = "liked your photo"
-        if n.kind == "comment":
-            action = "commented"
+        rowy = y - offset + float(i) * row_h
+        if rowy + row_h < y or rowy > gh:
+            continue
+        if hovered(win, x0, rowy, w, row_h):
+            gui.fill_round(win, x0, rowy + 2.0 * s, w if w < 520.0 * s else 520.0 * s, row_h - 4.0 * s, 8.0 * s, t.surface2)
+        icon_col = t.text_dim
+        if n.kind == "like":
+            icon_col = t.like
         elif n.kind == "follow":
-            action = "started following you"
+            icon_col = t.accent
         elif n.kind == "mention":
-            action = "mentioned you"
-        draw_username(win, t, n.user, x0 + 60.0, rowy + 10.0, 14)
-        gui.text(win, x0 + 60.0 + float(gui.text_width(win, n.user.username, 14)) + 8.0, rowy + 11.0, "{action}  {n.time_label}", t.text_dim, 13)
-        if n.kind == "comment":
-            gui.clip_push(win, x0 + 60.0, rowy + 32.0, w - 140.0, 18.0)
-            gui.text(win, x0 + 60.0, rowy + 32.0, n.text, t.text_dim, 12)
-            gui.clip_pop(win)
-        # thumbnail chip
-        pair = gradient_pair(n.thumb_seed)
-        gui.fill_rect(win, x0 + w - 52.0, rowy + 10.0, 36.0, 36.0, pair.0)
-        # follow button
-        if n.kind == "follow":
-            draw_button(win, t, x0 + w - 110.0, rowy + 12.0, 76.0, 30.0, "follow", true)
-        if click_zone(win, x0 + 8.0, rowy, w - 16.0, row_h):
-            app.screen = "profile"
-            app.profile_user = n.user.username
+            icon_col = t.sticker_b
+        imagepipe.draw_avatar(app, n.user, x0 + 24.0 * s, rowy + row_h / 2.0, 16.0 * s, false, false)
+        draw_username(win, t, n.user, x0 + 52.0 * s, rowy + 10.0 * s, 14.0 * s)
+        gui.clip_push(win, x0 + 52.0 * s, rowy + 30.0 * s, w - 140.0 * s, 20.0 * s)
+        gui.text(win, x0 + 52.0 * s, rowy + 31.0 * s, n.text, t.text_dim, 12.0 * s)
+        gui.clip_pop(win)
+        gui.text(win, gw - 96.0 * s - float(gui.text_width(win, n.time_label, 12.0 * s)), rowy + 12.0 * s, n.time_label, t.text_faint, 12.0 * s)
+        if n.kind == "like":
+            icon_heart(win, t, gw - 60.0 * s, rowy + 14.0 * s, 22.0 * s, icon_col)
+        elif n.kind == "follow":
+            gui.fill_circle(win, gw - 49.0 * s, rowy + 25.0 * s, 9.0 * s, icon_col)
+        elif n.kind == "comment":
+            icon_comment(win, t, gw - 60.0 * s, rowy + 14.0 * s, 22.0 * s, icon_col)
+        elif n.kind == "mention":
+            icon_message(win, t, gw - 60.0 * s, rowy + 14.0 * s, 22.0 * s, true)
+        else:
+            gui.fill_circle(win, gw - 49.0 * s, rowy + 25.0 * s, 9.0 * s, icon_col)
+    gui.clip_pop(win)
     return app
