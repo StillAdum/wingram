@@ -1,6 +1,6 @@
 # wingram — a PC Instagram-style client written entirely in Still
 #
-# Requires the Still 0.6.1+ runtime (gui/net/audio/media/json + read_dir).
+# Requires the Still 0.6.4+ runtime (gui/net/audio/media/json + read_dir).
 # Layout mirrors instagram.com web: top bar, left nav rail, centered column.
 #
 # Usage:
@@ -34,9 +34,12 @@ NAV_W = 220
 
 func main():
     argv = args()
+    smoke = false
     for i in range(len(argv)):
         if argv[i] == "--selftest":
             exit(selftest())
+        if argv[i] == "--smoke":
+            smoke = true
 
     if not gui.available():
         print("wingram needs a display backend (gui module requires Windows in this build)")
@@ -64,6 +67,7 @@ func main():
 
     app.toast_for("welcome to wingram — mods loaded: {len(app.mods.mods)}", 3.0)
 
+    frames = 0
     while app.running and gui.window_open(win):
         if gui.begin_frame(win):
             t = app.theme
@@ -84,9 +88,14 @@ func main():
         else:
             # window was closed inside begin_frame's pump
             break
+        frames = frames + 1
+        if smoke and frames >= 90:
+            break
         sleep_ms(16)
     gui.close_window(win)
     persist(app)
+    if smoke:
+        print("smoke ok: {frames} frames rendered")
 
 func persist(app: App):
     save_config("config.ini", app.mods, app.settings_cfg)

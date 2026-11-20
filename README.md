@@ -61,9 +61,10 @@ official API for third-party clients, so Wingram ships three data sources:
 
 ## Build
 
-Wingram needs the **Still 0.6.2+** compiler (its `net`, `gui`, `audio`,
+Wingram needs the **Still 0.6.4+** compiler (its `net`, `gui`, `audio`,
 `media`, `json` stdlib modules and `read_dir`/`file_exists`/`dict_key_at`
-builtins are what Wingram is built on):
+builtins are what Wingram is built on; 0.6.4 fixes three code-generation
+bugs that crashed GUI programs — always build Wingram with 0.6.4+):
 
 ```powershell
 # get the compiler (Windows x64)
@@ -119,6 +120,17 @@ src/
   screens/                feed, explore, reels, notes, dm, profile, notifications, settings
 .github/workflows/        CI: typecheck → build → selftest → artifact/release
 ```
+
+## Changelog
+
+- **v0.1.2** — fix the crash-on-launch white-window bug (root cause was in
+  the Still 0.6.3 compiler: `d.get(key, x.f)` with a field fallback could
+  free the fallback before storing it; rebuilt against Still 0.6.4). CI now
+  also opens a real window for 90 frames (`--smoke`) so GUI regressions
+  fail the build. Fixes corrupted `[mod]` markers in docs and sample mods.
+- **v0.1.1** — release packaging fixes (source zip, release notes).
+- **v0.1.0** — first public version: feed, stories, reels, explore, DMs,
+  profile, notifications, settings, Mods system, songs in notes.
 
 ## Screenshots
 
