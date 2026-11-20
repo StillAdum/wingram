@@ -11,7 +11,7 @@ and the choice persists in `config.ini`.
 ```ini
 # comments start with # and blank lines are ignored
 
-[m[m[m[m[mod]                       # required: identity
+[m[m[m[m[m[mod]                       # required: identity
 id = darker-dark            # unique id (used for save state) — required
 name = Darker Dark          # shown in the Mods list
 version = 1.0.0
@@ -46,8 +46,8 @@ round_avatars = on
 
 - **One mod per file.** The file name becomes the chip shown in Settings
   (`darker_dark.strc` → `darker_dark.strc`), but the identity is the
-  `id` under `[m[m[m[m[mod]` — that is what the enable list persists.
-- **A file without a valid `[m[m[m[m[mod]` `id` is skipped** (shown as
+  `id` under `[m[m[m[m[m[mod]` — that is what the enable list persists.
+- **A file without a valid `[m[m[m[m[m[mod]` `id` is skipped** (shown as
   `(unnamed mod)` is never stored).
 - **Last enabled wins.** If two enabled mods set the same key, the one later
   in the scan order (alphabetical by file name) takes effect.
